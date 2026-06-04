@@ -50,6 +50,7 @@ public:
 
     void connect(gr::top_block_sptr top_block) override;
     void disconnect(gr::top_block_sptr top_block) override;
+    void switch_input_filter(std::shared_ptr<GNSSBlockInterface> new_input_filter, gr::top_block_sptr top_block);
     gr::basic_block_sptr get_left_block() override;
     gr::basic_block_sptr get_right_block() override;
 

@@ -111,6 +111,47 @@ void SignalConditioner::disconnect(gr::top_block_sptr top_block)
 }
 
 
+void SignalConditioner::switch_input_filter(std::shared_ptr<GNSSBlockInterface> new_input_filter, gr::top_block_sptr top_block)
+{
+    if (new_input_filter == nullptr)
+        {
+            throw std::invalid_argument("InputFilter implementation not defined");
+        }
+
+    const size_t data_type_adapter_output_size = data_type_adapt_->get_right_block()->output_signature()->sizeof_stream_item(0);
+    const size_t input_filter_input_size = new_input_filter->get_left_block()->input_signature()->sizeof_stream_item(0);
+    const size_t input_filter_output_size = new_input_filter->get_right_block()->output_signature()->sizeof_stream_item(0);
+    const size_t resampler_input_size = res_->get_left_block()->input_signature()->sizeof_stream_item(0);
+
+    if (data_type_adapter_output_size != input_filter_input_size)
+        {
+            throw std::invalid_argument("itemsize mismatch: Invalid input/output data type configuration for the DataTypeAdapter/InputFilter connection");
+        }
+
+    if (input_filter_output_size != resampler_input_size)
+        {
+            throw std::invalid_argument("itemsize mismatch: Invalid input/output data type configuration for the Input Filter/Resampler connection");
+        }
+
+    if (!connected_)
+        {
+            in_filt_ = std::move(new_input_filter);
+            return;
+        }
+
+    new_input_filter->connect(top_block);
+
+    top_block->disconnect(data_type_adapt_->get_right_block(), 0, in_filt_->get_left_block(), 0);
+    top_block->disconnect(in_filt_->get_right_block(), 0, res_->get_left_block(), 0);
+    in_filt_->disconnect(top_block);
+
+    top_block->connect(data_type_adapt_->get_right_block(), 0, new_input_filter->get_left_block(), 0);
+    top_block->connect(new_input_filter->get_right_block(), 0, res_->get_left_block(), 0);
+
+    in_filt_ = std::move(new_input_filter);
+}
+
+
 gr::basic_block_sptr SignalConditioner::get_left_block()
 {
     return data_type_adapt_->get_left_block();
