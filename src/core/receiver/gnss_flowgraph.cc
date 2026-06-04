@@ -39,6 +39,7 @@
 #include "gnss_synchro_monitor.h"
 #include "nav_message_monitor.h"
 #include "qzss.h"
+#include "signal_conditioner.h"
 #include "signal_source_interface.h"
 #include <boost/lexical_cast.hpp>    // for boost::lexical_cast
 #include <boost/tokenizer.hpp>       // for boost::tokenizer
@@ -1801,6 +1802,8 @@ void GNSSFlowgraph::acquisition_manager(unsigned int who)
  * --- actions from TC channel control ---
  * -> 20 stop channel
  * -> 21 start channel
+ * --- actions from TC runtime filter control ---
+ * -> 30 switch input filter implementation
  */
 void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
 {
@@ -1903,6 +1906,96 @@ void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
                         }
                 }
             acq_channels_count_ = 0;  // all channels are in standby now and no new acquisition should be started
+            break;
+        case 30:
+            {
+                if (enable_fpga_offloading_)
+                    {
+                        LOG(WARNING) << "Runtime input filter switching is not supported when FPGA off-loading is enabled";
+                        break;
+                    }
+                if (!connected_)
+                    {
+                        LOG(WARNING) << "Flowgraph is not connected, cannot switch input filter implementation";
+                        break;
+                    }
+
+                std::string target_impl;
+                if (who == 301)
+                    {
+                        target_impl = "Pass_Through";
+                    }
+                else if (who == 302)
+                    {
+                        target_impl = "Notch_Filter";
+                    }
+                else if (who == 303)
+                    {
+                        target_impl = "Pulse_Blanking_Filter";
+                    }
+                else if (who == 304)
+                    {
+                        target_impl = "Notch_Filter_Lite";
+                    }
+                else
+                    {
+                        LOG(WARNING) << "Unknown filter selection command id " << who;
+                        break;
+                    }
+
+                GNSSBlockFactory block_factory;
+                size_t switched_conditioners = 0;
+                bool was_locked = false;
+
+                try
+                    {
+                        if (running_)
+                            {
+                                top_block_->lock();
+                                was_locked = true;
+                            }
+
+                        for (auto& conditioner_iface : sig_conditioner_)
+                            {
+                                auto conditioner = std::dynamic_pointer_cast<SignalConditioner>(conditioner_iface);
+                                if (!conditioner)
+                                    {
+                                        continue;
+                                    }
+
+                                const std::string input_filter_role = conditioner->input_filter()->role();
+                                configuration_->set_property(input_filter_role + ".implementation", target_impl);
+
+                                auto new_input_filter = block_factory.GetBlock(configuration_.get(), input_filter_role, 1, 1);
+                                if (!new_input_filter)
+                                    {
+                                        LOG(ERROR) << "Unable to instantiate input filter " << target_impl << " for role " << input_filter_role;
+                                        continue;
+                                    }
+
+                                conditioner->switch_input_filter(std::move(new_input_filter), top_block_);
+                                switched_conditioners++;
+                            }
+
+                        if (switched_conditioners == 0)
+                            {
+                                LOG(WARNING) << "No Signal_Conditioner blocks available to switch input filters at runtime";
+                            }
+                        else
+                            {
+                                LOG(INFO) << "Runtime input filter switched to " << target_impl << " for " << switched_conditioners << " signal conditioner block(s)";
+                            }
+                    }
+                catch (const std::exception& e)
+                    {
+                        LOG(ERROR) << "Error switching input filter at runtime: " << e.what();
+                    }
+
+                if (was_locked)
+                    {
+                        top_block_->unlock();
+                    }
+            }
             break;
         default:
             break;

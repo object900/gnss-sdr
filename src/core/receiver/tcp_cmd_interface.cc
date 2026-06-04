@@ -53,6 +53,7 @@ void TcpCmdInterface::register_functions()
     functions_["warmstart"] = [&](auto &s) { return TcpCmdInterface::warmstart(s); };
     functions_["coldstart"] = [&](auto &s) { return TcpCmdInterface::coldstart(s); };
     functions_["set_ch_satellite"] = [&](auto &s) { return TcpCmdInterface::set_ch_satellite(s); };
+    functions_["set_input_filter"] = [&](auto &s) { return TcpCmdInterface::set_input_filter(s); };
 #else
     functions_["status"] = std::bind(&TcpCmdInterface::status, this, std::placeholders::_1);
     functions_["standby"] = std::bind(&TcpCmdInterface::standby, this, std::placeholders::_1);
@@ -61,6 +62,7 @@ void TcpCmdInterface::register_functions()
     functions_["warmstart"] = std::bind(&TcpCmdInterface::warmstart, this, std::placeholders::_1);
     functions_["coldstart"] = std::bind(&TcpCmdInterface::coldstart, this, std::placeholders::_1);
     functions_["set_ch_satellite"] = std::bind(&TcpCmdInterface::set_ch_satellite, this, std::placeholders::_1);
+    functions_["set_input_filter"] = std::bind(&TcpCmdInterface::set_input_filter, this, std::placeholders::_1);
 #endif
 }
 
@@ -287,6 +289,49 @@ std::string TcpCmdInterface::set_ch_satellite(const std::vector<std::string> &co
     // todo: implement the set satellite command
     response = "Not implemented\n";
     return response;
+}
+
+
+std::string TcpCmdInterface::set_input_filter(const std::vector<std::string> &commandLine)
+{
+    if (commandLine.size() < 2)
+        {
+            return "ERROR: filter name missing. Use set_input_filter Pass_Through|Notch_Filter|Pulse_Blanking_Filter|Notch_Filter_Lite\n";
+        }
+
+    const std::string &requested_filter = commandLine.at(1);
+    int command_id = 0;
+
+    if (requested_filter == "Pass_Through" || requested_filter == "pass_through" || requested_filter == "pass" || requested_filter == "bypass")
+        {
+            command_id = 301;
+        }
+    else if (requested_filter == "Notch_Filter" || requested_filter == "notch_filter" || requested_filter == "notch")
+        {
+            command_id = 302;
+        }
+    else if (requested_filter == "Pulse_Blanking_Filter" || requested_filter == "pulse_blanking_filter" || requested_filter == "pulse_blanking" || requested_filter == "blanking")
+        {
+            command_id = 303;
+        }
+    else if (requested_filter == "Notch_Filter_Lite" || requested_filter == "notch_filter_lite" || requested_filter == "notch_lite")
+        {
+            command_id = 304;
+        }
+    else
+        {
+            return "ERROR: unsupported filter. Use Pass_Through|Notch_Filter|Pulse_Blanking_Filter|Notch_Filter_Lite\n";
+        }
+
+    if (control_queue_ == nullptr)
+        {
+            return "ERROR\n";
+        }
+
+    // event_type 30 is handled by GNSSFlowgraph and command_id selects the target filter implementation.
+    const command_event_sptr new_evnt = command_event_make(command_id, 30);
+    control_queue_->push(pmt::make_any(new_evnt));
+    return "OK\n";
 }
 
 
