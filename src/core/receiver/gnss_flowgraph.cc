@@ -39,6 +39,7 @@
 #include "gnss_synchro_monitor.h"
 #include "nav_message_monitor.h"
 #include "notch_filter.h"
+#include "pulse_blanking_filter.h"
 #include "qzss.h"
 #include "signal_conditioner.h"
 #include "signal_source_interface.h"
@@ -1921,15 +1922,27 @@ void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
                         break;
                     }
 
-                // Fast path for Notch_Filter toggling: atomically flip the enabled flag
+                // Fast path for Notch/PulseBlanking toggling: atomically flip enabled flags
                 // without any flowgraph lock/unlock, which would pause sample delivery
-                // and cause tracking loops to lose lock.
-                if (who == 301 || who == 302)
+                // and cause tracking loops to lose lock. Modes are mutually exclusive.
+                if (who == 301 || who == 302 || who == 303)
                     {
                         const bool enable_notch = (who == 302);
+                        const bool enable_pb = (who == 303);
                         NotchFilter::set_all_enabled(enable_notch);
-                        LOG(INFO) << "Runtime input filter: "
-                                  << (enable_notch ? "Notch_Filter active" : "Notch_Filter bypassed (pass-through)");
+                        PulseBlankingFilter::set_all_enabled(enable_pb);
+                        if (who == 301)
+                            {
+                                LOG(INFO) << "Runtime input filter: pass-through (both filters bypassed)";
+                            }
+                        else if (who == 302)
+                            {
+                                LOG(INFO) << "Runtime input filter: Notch_Filter active, PulseBlanking bypassed";
+                            }
+                        else
+                            {
+                                LOG(INFO) << "Runtime input filter: Pulse_Blanking_Filter active, Notch bypassed";
+                            }
                         break;
                     }
 

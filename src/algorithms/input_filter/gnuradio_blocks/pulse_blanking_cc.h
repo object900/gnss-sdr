@@ -22,6 +22,7 @@
 #include "gnss_block_interface.h"
 #include <gnuradio/block.h>
 #include <volk_gnsssdr/volk_gnsssdr_alloc.h>  // for volk_gnsssdr::vector
+#include <atomic>
 #include <cstdint>
 
 /** \addtogroup Input_Filter
@@ -46,6 +47,8 @@ class pulse_blanking_cc : public gr::block
 public:
     ~pulse_blanking_cc() = default;
 
+    void set_enabled(bool enabled);
+
     int general_work(int noutput_items __attribute__((unused)), gr_vector_int &ninput_items __attribute__((unused)),
         gr_vector_const_void_star &input_items, gr_vector_void_star &output_items);
 
@@ -53,6 +56,8 @@ private:
     friend pulse_blanking_cc_sptr make_pulse_blanking_cc(float pfa, int32_t length, int32_t n_segments_est, int32_t n_segments_reset);
     pulse_blanking_cc(float pfa, int32_t length, int32_t n_segments_est, int32_t n_segments_reset);
     volk_gnsssdr::vector<gr_complex> zeros_;
+    std::atomic<bool> enabled_;
+    uint64_t work_iterations_;
     float noise_power_estimation_;
     float thres_;
     float pfa_;

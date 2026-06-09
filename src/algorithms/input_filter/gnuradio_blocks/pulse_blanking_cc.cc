@@ -21,6 +21,7 @@
 #include <gnuradio/io_signature.h>
 #include <volk/volk.h>
 #include <algorithm>
+#include <iostream>
 
 
 pulse_blanking_cc_sptr make_pulse_blanking_cc(float pfa, int32_t length,
@@ -37,6 +38,8 @@ pulse_blanking_cc::pulse_blanking_cc(float pfa,
     : gr::block("pulse_blanking_cc",
           gr::io_signature::make(1, 1, sizeof(gr_complex)),
           gr::io_signature::make(1, 1, sizeof(gr_complex))),
+      enabled_(false),
+      work_iterations_(0),
       noise_power_estimation_(0.0),
       pfa_(pfa),
       length_(length),
@@ -54,18 +57,41 @@ pulse_blanking_cc::pulse_blanking_cc(float pfa,
 }
 
 
+void pulse_blanking_cc::set_enabled(bool enabled)
+{
+    enabled_.store(enabled, std::memory_order_relaxed);
+}
+
+
 int pulse_blanking_cc::general_work(int noutput_items, gr_vector_int &ninput_items __attribute__((unused)),
     gr_vector_const_void_star &input_items, gr_vector_void_star &output_items)
 {
     const auto *in = reinterpret_cast<const gr_complex *>(input_items[0]);
     auto *out = reinterpret_cast<gr_complex *>(output_items[0]);
-    auto magnitude = volk_gnsssdr::vector<float>(noutput_items);
-    volk_32fc_magnitude_squared_32f(magnitude.data(), in, noutput_items);
     int32_t sample_index = 0;
     float segment_energy;
     while ((sample_index + length_) < noutput_items)
         {
-            volk_32f_accumulator_s32f(&segment_energy, (magnitude.data() + sample_index), length_);
+            if (!enabled_.load(std::memory_order_relaxed))
+                {
+                    std::copy(in, in + length_, out);
+                    in += length_;
+                    out += length_;
+                    sample_index += length_;
+                    n_segments_++;
+                    continue;
+                }
+
+            work_iterations_++;
+            if (work_iterations_ % 100000ULL == 0ULL)
+                {
+                    std::cout << "[PulseBlanking] Iter: " << work_iterations_ << "\n";
+                }
+
+            auto magnitude = volk_gnsssdr::vector<float>(length_);
+            volk_32fc_magnitude_squared_32f(magnitude.data(), in, length_);
+            volk_32f_accumulator_s32f(&segment_energy, magnitude.data(), length_);
+
             if ((n_segments_ < n_segments_est_) && (last_filtered_ == false))
                 {
                     noise_power_estimation_ = (static_cast<float>(n_segments_) * noise_power_estimation_ + segment_energy / static_cast<float>(n_deg_fred_)) / static_cast<float>(n_segments_ + 1);

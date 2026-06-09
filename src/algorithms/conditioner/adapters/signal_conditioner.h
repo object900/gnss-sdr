@@ -42,6 +42,7 @@ public:
     //! Constructor
     SignalConditioner(std::shared_ptr<GNSSBlockInterface> data_type_adapt,
         std::shared_ptr<GNSSBlockInterface> in_filt,
+        std::shared_ptr<GNSSBlockInterface> in_filt2,
         std::shared_ptr<GNSSBlockInterface> res,
         std::string role);
 
@@ -67,6 +68,7 @@ public:
 private:
     std::shared_ptr<GNSSBlockInterface> data_type_adapt_;
     std::shared_ptr<GNSSBlockInterface> in_filt_;
+    std::shared_ptr<GNSSBlockInterface> in_filt2_;
     std::shared_ptr<GNSSBlockInterface> res_;
     std::string role_;
     bool connected_;

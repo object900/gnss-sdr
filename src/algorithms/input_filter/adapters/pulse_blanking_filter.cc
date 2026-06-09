@@ -18,6 +18,7 @@
 
 #include "pulse_blanking_filter.h"
 #include "configuration_interface.h"
+#include <algorithm>
 #include <boost/lexical_cast.hpp>
 #include <gnuradio/filter/firdes.h>
 #include <cmath>
@@ -29,6 +30,10 @@
 #else
 #include <absl/log/log.h>
 #endif
+
+std::mutex PulseBlankingFilter::registry_mutex_;
+std::vector<pulse_blanking_cc_sptr> PulseBlankingFilter::registry_;
+
 
 PulseBlankingFilter::PulseBlankingFilter(const ConfigurationInterface* configuration,
     std::string role,
@@ -63,6 +68,8 @@ PulseBlankingFilter::PulseBlankingFilter(const ConfigurationInterface* configura
             item_size = sizeof(gr_complex);    // output
             input_size_ = sizeof(gr_complex);  // input
             pulse_blanking_cc_ = make_pulse_blanking_cc(pfa, length_, n_segments_est, n_segments_reset);
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            registry_.push_back(pulse_blanking_cc_);
         }
     else
         {
@@ -140,6 +147,20 @@ void PulseBlankingFilter::disconnect(gr::top_block_sptr top_block)
     else
         {
             LOG(ERROR) << " Unknown input filter input/output item type conversion";
+        }
+}
+
+
+void PulseBlankingFilter::set_all_enabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(registry_mutex_);
+    registry_.erase(
+        std::remove_if(registry_.begin(), registry_.end(),
+            [](const pulse_blanking_cc_sptr& pb) { return pb == nullptr; }),
+        registry_.end());
+    for (const auto& pb : registry_)
+        {
+            pb->set_enabled(enabled);
         }
 }
 
