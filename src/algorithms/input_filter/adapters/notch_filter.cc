@@ -19,6 +19,7 @@
 #include "configuration_interface.h"
 #include "notch_cc.h"
 #include <boost/lexical_cast.hpp>
+#include <algorithm>
 #include <utility>
 
 #if USE_GLOG_AND_GFLAGS
@@ -26,6 +27,9 @@
 #else
 #include <absl/log/log.h>
 #endif
+
+std::mutex NotchFilter::registry_mutex_;
+std::vector<notch_sptr> NotchFilter::registry_;
 
 NotchFilter::NotchFilter(const ConfigurationInterface* configuration,
     const std::string& role,
@@ -60,6 +64,8 @@ NotchFilter::NotchFilter(const ConfigurationInterface* configuration,
             notch_filter_ = make_notch_filter(pfa, p_c_factor, length_, n_segments_est, n_segments_reset);
             DLOG(INFO) << "Item size " << item_size_;
             DLOG(INFO) << "input filter(" << notch_filter_->unique_id() << ")";
+            std::lock_guard<std::mutex> lock(registry_mutex_);
+            registry_.push_back(notch_filter_);
         }
     else
         {
@@ -99,9 +105,30 @@ void NotchFilter::connect(gr::top_block_sptr top_block)
 
 void NotchFilter::disconnect(gr::top_block_sptr top_block)
 {
+    notch_filter_->set_enabled(false);
+
     if (dump_)
         {
             top_block->disconnect(notch_filter_, 0, file_sink_, 0);
+        }
+}
+
+
+void NotchFilter::set_all_enabled(bool enabled)
+{
+    std::lock_guard<std::mutex> lock(registry_mutex_);
+
+    registry_.erase(
+        std::remove_if(registry_.begin(), registry_.end(),
+            [](const notch_sptr& notch)
+            {
+                return notch == nullptr;
+            }),
+        registry_.end());
+
+    for (const auto& notch : registry_)
+        {
+            notch->set_enabled(enabled);
         }
 }
 

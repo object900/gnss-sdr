@@ -38,6 +38,7 @@
 #include "gnss_sdr_make_unique.h"
 #include "gnss_synchro_monitor.h"
 #include "nav_message_monitor.h"
+#include "notch_filter.h"
 #include "qzss.h"
 #include "signal_conditioner.h"
 #include "signal_source_interface.h"
@@ -1920,16 +1921,20 @@ void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
                         break;
                     }
 
+                // Fast path for Notch_Filter toggling: atomically flip the enabled flag
+                // without any flowgraph lock/unlock, which would pause sample delivery
+                // and cause tracking loops to lose lock.
+                if (who == 301 || who == 302)
+                    {
+                        const bool enable_notch = (who == 302);
+                        NotchFilter::set_all_enabled(enable_notch);
+                        LOG(INFO) << "Runtime input filter: "
+                                  << (enable_notch ? "Notch_Filter active" : "Notch_Filter bypassed (pass-through)");
+                        break;
+                    }
+
                 std::string target_impl;
-                if (who == 301)
-                    {
-                        target_impl = "Pass_Through";
-                    }
-                else if (who == 302)
-                    {
-                        target_impl = "Notch_Filter";
-                    }
-                else if (who == 303)
+                if (who == 303)
                     {
                         target_impl = "Pulse_Blanking_Filter";
                     }
@@ -1946,13 +1951,50 @@ void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
                 GNSSBlockFactory block_factory;
                 size_t switched_conditioners = 0;
                 bool was_locked = false;
+                bool has_conditioners = false;
+                bool all_already_target = true;
+
+                for (const auto& conditioner_iface : sig_conditioner_)
+                    {
+                        auto conditioner = std::dynamic_pointer_cast<SignalConditioner>(conditioner_iface);
+                        if (!conditioner)
+                            {
+                                continue;
+                            }
+
+                        has_conditioners = true;
+                        if (conditioner->input_filter()->implementation() != target_impl)
+                            {
+                                all_already_target = false;
+                                break;
+                            }
+                    }
+
+                if (!has_conditioners)
+                    {
+                        LOG(WARNING) << "No Signal_Conditioner blocks available to switch input filters at runtime";
+                        break;
+                    }
+
+                if (all_already_target)
+                    {
+                        LOG(INFO) << "Runtime input filter already set to " << target_impl << ", skipping reconfiguration";
+                        break;
+                    }
 
                 try
                     {
                         if (running_)
                             {
+                                // Runtime graph rewiring under lock avoids channel state resets.
                                 top_block_->lock();
                                 was_locked = true;
+                            }
+
+                        if (target_impl == "Pass_Through")
+                            {
+                                // Disable Notch instances only while the flowgraph is locked.
+                                NotchFilter::set_all_enabled(false);
                             }
 
                         for (auto& conditioner_iface : sig_conditioner_)
@@ -1979,7 +2021,7 @@ void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
 
                         if (switched_conditioners == 0)
                             {
-                                LOG(WARNING) << "No Signal_Conditioner blocks available to switch input filters at runtime";
+                                LOG(WARNING) << "No Signal_Conditioner blocks were switched at runtime";
                             }
                         else
                             {

@@ -21,6 +21,7 @@
 #include "gnss_block_interface.h"
 #include "notch_cc.h"
 #include <gnuradio/blocks/file_sink.h>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -62,7 +63,12 @@ public:
     gr::basic_block_sptr get_left_block();
     gr::basic_block_sptr get_right_block();
 
+    static void set_all_enabled(bool enabled);
+
 private:
+    static std::mutex registry_mutex_;
+    static std::vector<notch_sptr> registry_;
+
     notch_sptr notch_filter_;
     gr::blocks::file_sink::sptr file_sink_;
     std::string dump_filename_;

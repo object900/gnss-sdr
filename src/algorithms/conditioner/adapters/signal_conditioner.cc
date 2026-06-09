@@ -118,6 +118,12 @@ void SignalConditioner::switch_input_filter(std::shared_ptr<GNSSBlockInterface> 
             throw std::invalid_argument("InputFilter implementation not defined");
         }
 
+    if (in_filt_ != nullptr && in_filt_->implementation() == new_input_filter->implementation())
+        {
+            LOG(INFO) << "Signal conditioner input filter already set to " << new_input_filter->implementation();
+            return;
+        }
+
     const size_t data_type_adapter_output_size = data_type_adapt_->get_right_block()->output_signature()->sizeof_stream_item(0);
     const size_t input_filter_input_size = new_input_filter->get_left_block()->input_signature()->sizeof_stream_item(0);
     const size_t input_filter_output_size = new_input_filter->get_right_block()->output_signature()->sizeof_stream_item(0);
@@ -136,20 +142,24 @@ void SignalConditioner::switch_input_filter(std::shared_ptr<GNSSBlockInterface> 
     if (!connected_)
         {
             in_filt_ = std::move(new_input_filter);
+            LOG(INFO) << "Signal conditioner input filter switched to " << in_filt_->implementation();
             return;
         }
 
+    auto old_input_filter = std::move(in_filt_);
+
+    // Enforce exclusive switching: detach old filter path first, then attach the new one.
+    top_block->disconnect(data_type_adapt_->get_right_block(), 0, old_input_filter->get_left_block(), 0);
+    top_block->disconnect(old_input_filter->get_right_block(), 0, res_->get_left_block(), 0);
+    old_input_filter->disconnect(top_block);
+
     new_input_filter->connect(top_block);
-
-    top_block->disconnect(data_type_adapt_->get_right_block(), 0, in_filt_->get_left_block(), 0);
-    top_block->disconnect(in_filt_->get_right_block(), 0, res_->get_left_block(), 0);
-    in_filt_->disconnect(top_block);
-
     top_block->connect(data_type_adapt_->get_right_block(), 0, new_input_filter->get_left_block(), 0);
     top_block->connect(new_input_filter->get_right_block(), 0, res_->get_left_block(), 0);
 
     in_filt_ = std::move(new_input_filter);
-    std::cout << "Switched FILTER";
+    old_input_filter.reset();
+    LOG(INFO) << "Signal conditioner input filter switched to " << in_filt_->implementation();
 }
 
 
