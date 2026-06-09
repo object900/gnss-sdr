@@ -988,10 +988,13 @@ std::unique_ptr<GNSSBlockInterface> GNSSBlockFactory::GetSignalConditioner(
             return nullptr;
         }
 
-    // single-antenna version
+    // single-antenna version — PulseBlankingFilter is always chained after the primary
+    // InputFilter (starts disabled/bypass). Activated exclusively via telecommand 303.
+    auto pb_filter = std::make_unique<PulseBlankingFilter>(configuration, "PulseBlankingFilter"s, 1, 1);
     return std::make_unique<SignalConditioner>(
         GetBlock(configuration, role_datatypeadapter, 1, 1),
         GetBlock(configuration, role_inputfilter, 1, 1),
+        std::move(pb_filter),
         GetBlock(configuration, role_resampler, 1, 1),
         role_conditioner);
 }

@@ -28,9 +28,11 @@
 // Constructor
 SignalConditioner::SignalConditioner(std::shared_ptr<GNSSBlockInterface> data_type_adapt,
     std::shared_ptr<GNSSBlockInterface> in_filt,
+    std::shared_ptr<GNSSBlockInterface> in_filt2,
     std::shared_ptr<GNSSBlockInterface> res,
     std::string role) : data_type_adapt_(std::move(data_type_adapt)),
                         in_filt_(std::move(in_filt)),
+                        in_filt2_(std::move(in_filt2)),
                         res_(std::move(res)),
                         role_(std::move(role)),
                         connected_(false)
@@ -57,8 +59,13 @@ void SignalConditioner::connect(gr::top_block_sptr top_block)
         {
             throw std::invalid_argument("Resampler implementation not defined");
         }
+
     data_type_adapt_->connect(top_block);
     in_filt_->connect(top_block);
+    if (in_filt2_ != nullptr)
+        {
+            in_filt2_->connect(top_block);
+        }
     res_->connect(top_block);
 
     if (in_filt_->item_size() == 0)
@@ -68,24 +75,28 @@ void SignalConditioner::connect(gr::top_block_sptr top_block)
 
     const size_t data_type_adapter_output_size = data_type_adapt_->get_right_block()->output_signature()->sizeof_stream_item(0);
     const size_t input_filter_input_size = in_filt_->get_left_block()->input_signature()->sizeof_stream_item(0);
-    const size_t input_filter_output_size = in_filt_->get_right_block()->output_signature()->sizeof_stream_item(0);
-    const size_t resampler_input_size = res_->get_left_block()->input_signature()->sizeof_stream_item(0);
 
     if (data_type_adapter_output_size != input_filter_input_size)
         {
             throw std::invalid_argument("itemsize mismatch: Invalid input/output data type configuration for the DataTypeAdapter/InputFilter connection");
         }
 
-    if (input_filter_output_size != resampler_input_size)
-        {
-            throw std::invalid_argument("itemsize mismatch: Invalid input/output data type configuration for the Input Filter/Resampler connection");
-        }
-
     top_block->connect(data_type_adapt_->get_right_block(), 0, in_filt_->get_left_block(), 0);
     DLOG(INFO) << "data_type_adapter -> input_filter";
 
-    top_block->connect(in_filt_->get_right_block(), 0, res_->get_left_block(), 0);
-    DLOG(INFO) << "input_filter -> resampler";
+    if (in_filt2_ != nullptr)
+        {
+            top_block->connect(in_filt_->get_right_block(), 0, in_filt2_->get_left_block(), 0);
+            DLOG(INFO) << "input_filter -> input_filter2";
+            top_block->connect(in_filt2_->get_right_block(), 0, res_->get_left_block(), 0);
+            DLOG(INFO) << "input_filter2 -> resampler";
+        }
+    else
+        {
+            top_block->connect(in_filt_->get_right_block(), 0, res_->get_left_block(), 0);
+            DLOG(INFO) << "input_filter -> resampler";
+        }
+
     connected_ = true;
 }
 
@@ -98,13 +109,24 @@ void SignalConditioner::disconnect(gr::top_block_sptr top_block)
             return;
         }
 
-    top_block->disconnect(data_type_adapt_->get_right_block(), 0,
-        in_filt_->get_left_block(), 0);
-    top_block->disconnect(in_filt_->get_right_block(), 0,
-        res_->get_left_block(), 0);
+    top_block->disconnect(data_type_adapt_->get_right_block(), 0, in_filt_->get_left_block(), 0);
+
+    if (in_filt2_ != nullptr)
+        {
+            top_block->disconnect(in_filt_->get_right_block(), 0, in_filt2_->get_left_block(), 0);
+            top_block->disconnect(in_filt2_->get_right_block(), 0, res_->get_left_block(), 0);
+        }
+    else
+        {
+            top_block->disconnect(in_filt_->get_right_block(), 0, res_->get_left_block(), 0);
+        }
 
     data_type_adapt_->disconnect(top_block);
     in_filt_->disconnect(top_block);
+    if (in_filt2_ != nullptr)
+        {
+            in_filt2_->disconnect(top_block);
+        }
     res_->disconnect(std::move(top_block));
 
     connected_ = false;
@@ -124,21 +146,6 @@ void SignalConditioner::switch_input_filter(std::shared_ptr<GNSSBlockInterface> 
             return;
         }
 
-    const size_t data_type_adapter_output_size = data_type_adapt_->get_right_block()->output_signature()->sizeof_stream_item(0);
-    const size_t input_filter_input_size = new_input_filter->get_left_block()->input_signature()->sizeof_stream_item(0);
-    const size_t input_filter_output_size = new_input_filter->get_right_block()->output_signature()->sizeof_stream_item(0);
-    const size_t resampler_input_size = res_->get_left_block()->input_signature()->sizeof_stream_item(0);
-
-    if (data_type_adapter_output_size != input_filter_input_size)
-        {
-            throw std::invalid_argument("itemsize mismatch: Invalid input/output data type configuration for the DataTypeAdapter/InputFilter connection");
-        }
-
-    if (input_filter_output_size != resampler_input_size)
-        {
-            throw std::invalid_argument("itemsize mismatch: Invalid input/output data type configuration for the Input Filter/Resampler connection");
-        }
-
     if (!connected_)
         {
             in_filt_ = std::move(new_input_filter);
@@ -148,14 +155,28 @@ void SignalConditioner::switch_input_filter(std::shared_ptr<GNSSBlockInterface> 
 
     auto old_input_filter = std::move(in_filt_);
 
-    // Enforce exclusive switching: detach old filter path first, then attach the new one.
+    // Detach old filter, attach new one. in_filt2_ stays connected throughout.
     top_block->disconnect(data_type_adapt_->get_right_block(), 0, old_input_filter->get_left_block(), 0);
-    top_block->disconnect(old_input_filter->get_right_block(), 0, res_->get_left_block(), 0);
+    if (in_filt2_ != nullptr)
+        {
+            top_block->disconnect(old_input_filter->get_right_block(), 0, in_filt2_->get_left_block(), 0);
+        }
+    else
+        {
+            top_block->disconnect(old_input_filter->get_right_block(), 0, res_->get_left_block(), 0);
+        }
     old_input_filter->disconnect(top_block);
 
     new_input_filter->connect(top_block);
     top_block->connect(data_type_adapt_->get_right_block(), 0, new_input_filter->get_left_block(), 0);
-    top_block->connect(new_input_filter->get_right_block(), 0, res_->get_left_block(), 0);
+    if (in_filt2_ != nullptr)
+        {
+            top_block->connect(new_input_filter->get_right_block(), 0, in_filt2_->get_left_block(), 0);
+        }
+    else
+        {
+            top_block->connect(new_input_filter->get_right_block(), 0, res_->get_left_block(), 0);
+        }
 
     in_filt_ = std::move(new_input_filter);
     old_input_filter.reset();

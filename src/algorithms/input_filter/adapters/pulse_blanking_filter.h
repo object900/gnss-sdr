@@ -21,6 +21,8 @@
 #include "gnss_block_interface.h"
 #include "pulse_blanking_cc.h"
 #include <gnuradio/blocks/file_sink.h>
+#include <mutex>
+#include <vector>
 #ifdef GR_GREATER_38
 #include <gnuradio/filter/freq_xlating_fir_filter.h>
 #else
@@ -66,7 +68,11 @@ public:
     gr::basic_block_sptr get_left_block() override;
     gr::basic_block_sptr get_right_block() override;
 
+    static void set_all_enabled(bool enabled);
+
 private:
+    static std::mutex registry_mutex_;
+    static std::vector<pulse_blanking_cc_sptr> registry_;
     pulse_blanking_cc_sptr pulse_blanking_cc_;
     gr::filter::freq_xlating_fir_filter_ccf::sptr freq_xlating_;
     gr::blocks::file_sink::sptr file_sink_;
