@@ -23,6 +23,7 @@
 #include <exception>  // for exception
 #include <iomanip>    // for setprecision
 #include <sstream>    // for stringstream
+#include <thread>     // for thread
 #include <utility>    // for move
 
 #if USE_BOOST_ASIO_IO_CONTEXT
@@ -302,6 +303,8 @@ std::string TcpCmdInterface::set_input_filter(const std::vector<std::string> &co
     const std::string &requested_filter = commandLine.at(1);
     int command_id = 0;
 
+    std::cout << "Requested filter" << requested_filter << "\n";
+
     if (requested_filter == "Pass_Through" || requested_filter == "pass_through" || requested_filter == "pass" || requested_filter == "bypass")
         {
             command_id = 301;
@@ -369,79 +372,79 @@ void TcpCmdInterface::run_cmd_server(int tcp_port)
                                     continue;
                                 }
 
-                            // Read a message
-                            boost::system::error_code error = boost::asio::error::eof;
-                            do
-                                {
-                                    std::string response;
-                                    boost::asio::streambuf b;
-                                    if (boost::asio::read_until(socket, b, '\n', error) == 0)
-                                        {
-                                            std::cerr << "TcpCmdInterface: Error reading messages: " << error.message() << '\n';
-                                        }
-                                    std::istream is(&b);
-                                    std::string line;
-                                    std::getline(is, line);
-                                    std::istringstream iss(line);
-                                    const std::vector<std::string> cmd_vector(std::istream_iterator<std::string>{iss},
-                                        std::istream_iterator<std::string>());
+                            std::thread([this, socket = std::move(socket)]() mutable {
+                                boost::system::error_code local_write_error;
+                                boost::system::error_code error = boost::asio::error::eof;
 
-                                    if (!cmd_vector.empty())
-                                        {
-                                            try
-                                                {
-                                                    if (cmd_vector.at(0) == "exit")
-                                                        {
-                                                            error = boost::asio::error::eof;
-                                                            // send cmd response
-                                                            if (socket.write_some(boost::asio::buffer("OK\n"), not_throw) == 0)
-                                                                {
-                                                                    std::cerr << "Error: 0 bytes sent in cmd response\n";
-                                                                }
-                                                        }
-                                                    else
-                                                        {
-                                                            response = functions_[cmd_vector.at(0)](cmd_vector);
-                                                        }
-                                                }
-                                            catch (const std::bad_function_call &ex)
-                                                {
-                                                    response = "ERROR: command not found \n ";
-                                                }
-                                            catch (const std::exception &ex)
-                                                {
-                                                    response = "ERROR: command execution error: " + std::string(ex.what()) + "\n";
-                                                }
-                                        }
-                                    else
-                                        {
-                                            response = "ERROR: empty command\n";
-                                        }
+                                do
+                                    {
+                                        std::string response;
+                                        boost::asio::streambuf b;
+                                        if (boost::asio::read_until(socket, b, '\n', error) == 0)
+                                            {
+                                                std::cerr << "TcpCmdInterface: Error reading messages: " << error.message() << '\n';
+                                            }
+                                        std::istream is(&b);
+                                        std::string line;
+                                        std::getline(is, line);
+                                        std::istringstream iss(line);
+                                        const std::vector<std::string> cmd_vector(std::istream_iterator<std::string>{iss},
+                                            std::istream_iterator<std::string>());
 
-                                    // send cmd response
-                                    if (socket.write_some(boost::asio::buffer(response), not_throw) == 0)
-                                        {
-                                            std::cerr << "Error: 0 bytes sent in cmd response\n";
-                                        }
-                                    if (not_throw)
-                                        {
-                                            std::cerr << "Error sending(" << not_throw.value() << "): " << not_throw.message() << '\n';
-                                            break;
-                                        }
-                                }
-                            while (error != boost::asio::error::eof);
+                                        if (!cmd_vector.empty())
+                                            {
+                                                try
+                                                    {
+                                                        if (cmd_vector.at(0) == "exit")
+                                                            {
+                                                                error = boost::asio::error::eof;
+                                                                if (socket.write_some(boost::asio::buffer("OK\n"), local_write_error) == 0)
+                                                                    {
+                                                                        std::cerr << "Error: 0 bytes sent in cmd response\n";
+                                                                    }
+                                                            }
+                                                        else
+                                                            {
+                                                                response = functions_[cmd_vector.at(0)](cmd_vector);
+                                                            }
+                                                    }
+                                                catch (const std::bad_function_call &ex)
+                                                    {
+                                                        response = "ERROR: command not found \n ";
+                                                    }
+                                                catch (const std::exception &ex)
+                                                    {
+                                                        response = "ERROR: command execution error: " + std::string(ex.what()) + "\n";
+                                                    }
+                                            }
+                                        else
+                                            {
+                                                response = "ERROR: empty command\n";
+                                            }
 
-                            if (error == boost::asio::error::eof)
-                                {
-                                    std::cerr << "TcpCmdInterface: EOF detected\n";
-                                }
-                            else
-                                {
-                                    std::cerr << "TcpCmdInterface unexpected error: " << error << '\n';
-                                }
+                                        if (socket.write_some(boost::asio::buffer(response), local_write_error) == 0)
+                                            {
+                                                std::cerr << "Error: 0 bytes sent in cmd response\n";
+                                            }
+                                        if (local_write_error)
+                                            {
+                                                std::cerr << "Error sending(" << local_write_error.value() << "): " << local_write_error.message() << '\n';
+                                                break;
+                                            }
+                                    }
+                                while (error != boost::asio::error::eof);
 
-                            // Close socket
-                            socket.close();
+                                if (error == boost::asio::error::eof)
+                                    {
+                                        std::cerr << "TcpCmdInterface: EOF detected\n";
+                                    }
+                                else
+                                    {
+                                        std::cerr << "TcpCmdInterface unexpected error: " << error << '\n';
+                                    }
+
+                                socket.close();
+                            }).detach();
                         }
                     catch (const boost::exception &e)
                         {

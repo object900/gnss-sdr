@@ -833,7 +833,7 @@ std::unique_ptr<GNSSBlockInterface> get_block(
                     block = std::make_unique<PulseBlankingFilter>(configuration, role, in_streams, out_streams);
                 }
             else if (implementation == "Notch_Filter")
-                {
+                { //TODO
                     block = std::make_unique<NotchFilter>(configuration, role, in_streams, out_streams);
                 }
             else if (implementation == "Notch_Filter_Lite")

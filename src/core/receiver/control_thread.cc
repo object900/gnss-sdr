@@ -1168,6 +1168,7 @@ std::vector<std::pair<int, Gnss_Satellite>> ControlThread::get_visible_sats(time
     });
     // provide list starting from satellites with higher elevation
     std::reverse(available_satellites.begin(), available_satellites.end());
+    //TODO AGNSS
     return available_satellites;
 }
 
