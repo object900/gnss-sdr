@@ -22,6 +22,7 @@
 #include "gnss_sdr_fft.h"
 #include <gnuradio/block.h>
 #include <volk_gnsssdr/volk_gnsssdr_alloc.h>  // for volk_gnsssdr::vector
+#include <atomic>
 #include <cstdint>
 #include <memory>
 
@@ -50,6 +51,8 @@ class Notch : public gr::block
 public:
     ~Notch() = default;
 
+    void set_enabled(bool enabled);
+
     int general_work(int noutput_items, gr_vector_int &ninput_items,
         gr_vector_const_void_star &input_items,
         gr_vector_void_star &output_items);
@@ -74,6 +77,8 @@ private:
     uint32_t n_segments_est_;
     uint32_t n_segments_reset_;
     bool filter_state_;
+    std::atomic<bool> enabled_;
+    uint64_t work_iterations_;
 };
 
 

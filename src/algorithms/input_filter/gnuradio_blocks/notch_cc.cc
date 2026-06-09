@@ -48,7 +48,9 @@ Notch::Notch(float pfa,
       n_segments_(0),
       n_segments_est_(n_segments_est),      // Set the number of segments for noise power estimation
       n_segments_reset_(n_segments_reset),  // Set the period (in segments) when the noise power is estimated
-      filter_state_(false)
+            filter_state_(false),
+            enabled_(false),
+            work_iterations_(0)
 {
     const int32_t alignment_multiple = volk_get_alignment() / sizeof(gr_complex);
     set_alignment(std::max(1, alignment_multiple));
@@ -58,6 +60,12 @@ Notch::Notch(float pfa,
     angle_ = volk_gnsssdr::vector<float>(length_);
     power_spect_ = volk_gnsssdr::vector<float>(length_);
     d_fft_ = gnss_fft_fwd_make_unique(length_);
+}
+
+
+void Notch::set_enabled(bool enabled)
+{
+    enabled_.store(enabled, std::memory_order_relaxed);
 }
 
 
@@ -71,8 +79,27 @@ int Notch::general_work(int noutput_items, gr_vector_int &ninput_items __attribu
     const auto *in = reinterpret_cast<const gr_complex *>(input_items[0]);
     auto *out = reinterpret_cast<gr_complex *>(output_items[0]);
     in++;
+
     while ((index_out + length_) < noutput_items)
         {
+            if (!enabled_.load(std::memory_order_relaxed))
+                {
+                    filter_state_ = false;
+                    std::copy(in, in + length_, out);
+                    index_out += length_;
+                    n_segments_++;
+                    in += length_;
+                    out += length_;
+                    continue;
+                }
+
+            work_iterations_++;
+            // Optional heartbeat for deep debugging without flooding logs.
+            if (work_iterations_ % 100000ULL == 0ULL)
+                {
+                    std::cout << "[Notch] Iter: " << work_iterations_ << "\n";
+                }
+
             // std::cout << "Notch filter is running\n";
             if ((n_segments_ < n_segments_est_) && (filter_state_ == false))
                 {
@@ -94,9 +121,9 @@ int Notch::general_work(int noutput_items, gr_vector_int &ninput_items __attribu
                                 {
                                     filter_state_ = true;
                                     last_out_ = gr_complex(0.0, 0.0);
-                                    std::cout << "[Notch] ACTIVE   seg=" << n_segments_
-                                              << "  ratio=" << power_ratio
-                                              << "  thres=" << thres_ << "\n";
+                                    // std::cout << "[Notch] ACTIVE   seg=" << n_segments_
+                                    //           << "  ratio=" << power_ratio
+                                    //           << "  thres=" << thres_ << "\n";
                                 }
                             volk_32fc_x2_multiply_conjugate_32fc(c_samples_.data(), in, (in - 1), length_);
                             volk_32fc_s32f_atan2_32f(angle_.data(), c_samples_.data(), static_cast<float>(1.0), length_);
@@ -109,12 +136,12 @@ int Notch::general_work(int noutput_items, gr_vector_int &ninput_items __attribu
                         }
                     else
                         {
-                            if (filter_state_ == true)
-                                {
-                                    std::cout << "[Notch] INACTIVE seg=" << n_segments_
-                                              << "  ratio=" << power_ratio
-                                              << "  thres=" << thres_ << "\n";
-                                }
+                            // if (filter_state_ == true)
+                            //     {
+                            //         std::cout << "[Notch] INACTIVE seg=" << n_segments_
+                            //                   << "  ratio=" << power_ratio
+                            //                   << "  thres=" << thres_ << "\n";
+                            //     }
                             if (n_segments_ > n_segments_reset_)
                                 {
                                     n_segments_ = 0;
