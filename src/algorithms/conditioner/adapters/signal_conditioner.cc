@@ -149,6 +149,7 @@ void SignalConditioner::switch_input_filter(std::shared_ptr<GNSSBlockInterface> 
     top_block->connect(new_input_filter->get_right_block(), 0, res_->get_left_block(), 0);
 
     in_filt_ = std::move(new_input_filter);
+    std::cout << "Switched FILTER";
 }
 
 

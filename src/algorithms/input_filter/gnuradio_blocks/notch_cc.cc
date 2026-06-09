@@ -20,6 +20,7 @@
 #include <volk/volk.h>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 
 
 notch_sptr make_notch_filter(float pfa, float p_c_factor,
@@ -72,6 +73,7 @@ int Notch::general_work(int noutput_items, gr_vector_int &ninput_items __attribu
     in++;
     while ((index_out + length_) < noutput_items)
         {
+            // std::cout << "Notch filter is running\n";
             if ((n_segments_ < n_segments_est_) && (filter_state_ == false))
                 {
                     std::copy(in, in + length_, d_fft_->get_inbuf());
@@ -85,12 +87,16 @@ int Notch::general_work(int noutput_items, gr_vector_int &ninput_items __attribu
             else
                 {
                     volk_32fc_x2_conjugate_dot_prod_32fc(&dot_prod_, in, in, length_);
-                    if ((lv_creal(dot_prod_) / noise_pow_est_) > thres_)
+                    const float power_ratio = lv_creal(dot_prod_) / noise_pow_est_;
+                    if (power_ratio > thres_)
                         {
                             if (filter_state_ == false)
                                 {
                                     filter_state_ = true;
                                     last_out_ = gr_complex(0.0, 0.0);
+                                    std::cout << "[Notch] ACTIVE   seg=" << n_segments_
+                                              << "  ratio=" << power_ratio
+                                              << "  thres=" << thres_ << "\n";
                                 }
                             volk_32fc_x2_multiply_conjugate_32fc(c_samples_.data(), in, (in - 1), length_);
                             volk_32fc_s32f_atan2_32f(angle_.data(), c_samples_.data(), static_cast<float>(1.0), length_);
@@ -103,6 +109,12 @@ int Notch::general_work(int noutput_items, gr_vector_int &ninput_items __attribu
                         }
                     else
                         {
+                            if (filter_state_ == true)
+                                {
+                                    std::cout << "[Notch] INACTIVE seg=" << n_segments_
+                                              << "  ratio=" << power_ratio
+                                              << "  thres=" << thres_ << "\n";
+                                }
                             if (n_segments_ > n_segments_reset_)
                                 {
                                     n_segments_ = 0;
