@@ -1947,11 +1947,7 @@ void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
                     }
 
                 std::string target_impl;
-                if (who == 303)
-                    {
-                        target_impl = "Pulse_Blanking_Filter";
-                    }
-                else if (who == 304)
+                if (who == 304)
                     {
                         target_impl = "Notch_Filter_Lite";
                     }
