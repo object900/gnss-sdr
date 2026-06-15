@@ -55,6 +55,7 @@
 
 class ChannelInterface;
 class ConfigurationInterface;
+class DeepLearningBlock;
 class GNSSBlockInterface;
 class Gnss_Satellite;
 class SignalSourceInterface;
@@ -229,6 +230,7 @@ private:
 
     std::map<std::string, gr::basic_block_sptr> acq_resamplers_;
     std::vector<gr::blocks::null_sink::sptr> null_sinks_;
+    std::shared_ptr<DeepLearningBlock> deep_learning_block_;
 
     gr::basic_block_sptr GnssSynchroMonitor_;
     gr::basic_block_sptr GnssSynchroAcquisitionMonitor_;

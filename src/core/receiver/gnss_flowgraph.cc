@@ -20,6 +20,7 @@
  */
 
 #include "gnss_flowgraph.h"
+#include "deeplearningblock.h"
 #include "GPS_L1_CA.h"
 #include "GPS_L2C.h"
 #include "GPS_L5.h"
@@ -521,6 +522,21 @@ int GNSSFlowgraph::connect_desktop_flowgraph()
         {
             return 1;
         }
+
+    deep_learning_block_ = DeepLearningBlock::make(512, queue_);
+    {
+        auto sig_cond = std::dynamic_pointer_cast<SignalConditioner>(sig_conditioner_.at(0));
+        if (sig_cond)
+            {
+                // tap after DataTypeAdapter, before InputFilter — unfiltered gr_complex
+                top_block_->connect(sig_cond->data_type_adapter()->get_right_block(), 0,
+                    deep_learning_block_, 0);
+            }
+        else
+            {
+                LOG(WARNING) << "DeepLearningBlock: could not cast to SignalConditioner, skipping tap";
+            }
+    }
 
     if (connect_sample_counter() != 0)
         {
