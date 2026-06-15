@@ -650,6 +650,7 @@ if(ENABLE_UNIT_TESTING)
             Volkgnsssdr::volkgnsssdr
             signal_source_adapters
             data_type_adapters
+            # deep_learning_block
             input_filter_adapters
             resampler_adapters
             channel_adapters
@@ -814,6 +815,7 @@ if(ENABLE_FPGA)
             Volk::volk
             channel_libs
             data_type_adapters
+            # deep_learning_block
             tracking_adapters
             signal_processing_testing_lib
             algorithms_libs
@@ -1073,6 +1075,7 @@ if(NOT ENABLE_PACKAGING AND NOT ENABLE_FPGA)
             Volkgnsssdr::volkgnsssdr
             signal_source_adapters
             data_type_adapters
+            # deep_learning_block
             input_filter_adapters
             channel_adapters
             core_receiver

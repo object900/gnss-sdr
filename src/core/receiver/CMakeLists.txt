@@ -185,6 +185,7 @@ target_link_libraries(core_receiver
         core_monitor
         signal_source_adapters
         data_type_adapters
+        deep_learning_block
         input_filter_adapters
         conditioner_adapters
         resampler_adapters
