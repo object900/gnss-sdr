@@ -532,8 +532,9 @@ int GNSSFlowgraph::connect_desktop_flowgraph()
         {
             const int deep_learning_window_size = configuration_->property("DeepLearningBlock.window_size", 512);
             const int deep_learning_update_interval = configuration_->property("DeepLearningBlock.update_interval", deep_learning_window_size);
+            const auto deep_learning_log_dir = configuration_->property("DeepLearningBlock.log_dir", std::string("/tmp/deep_learning_block"));
             deep_learning_block_ = DeepLearningBlock::make(
-                deep_learning_window_size, deep_learning_update_interval, deep_learning_model_path, queue_);
+                deep_learning_window_size, deep_learning_update_interval, deep_learning_model_path, deep_learning_log_dir, queue_);
 
             auto sig_cond = std::dynamic_pointer_cast<SignalConditioner>(sig_conditioner_.at(0));
             if (sig_cond)

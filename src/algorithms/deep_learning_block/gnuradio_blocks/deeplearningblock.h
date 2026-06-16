@@ -20,9 +20,13 @@ public:
     // update_interval: co ile nowych probek bufor (okno) jest odswiezany i
     //   ponownie podawany do STFT + inferencji (hop sliding window; dla
     //   update_interval == window_size zachowanie jak poprzednio: bez nakladania).
+    // log_dir: katalog, w ktorym blok zapisuje spectrogram_live.pgm (podglad na
+    //   zywo ostatniego okna STFT), inference_log.csv (werdykt + latencja STFT/ONNX
+    //   dla kazdej inferencji) i filter_switch_log.csv (momenty przelaczania filtra).
     static sptr make(int window_size,
                      int update_interval,
                      const std::string &model_path,
+                     const std::string &log_dir,
                      std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue);
 
     ~DeepLearningBlock();
@@ -36,6 +40,7 @@ private:
     DeepLearningBlock(int window_size,
                       int update_interval,
                       const std::string &model_path,
+                      const std::string &log_dir,
                       std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue);
     class Opaque;
     Opaque *o_;

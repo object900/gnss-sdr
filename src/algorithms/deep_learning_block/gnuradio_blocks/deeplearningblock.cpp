@@ -1,15 +1,22 @@
 #include "deeplearningblock.h"
 #include "gnss_sdr_fft.h"
+#include "gnss_sdr_filesystem.h"
 #include "onnx_model.h"
 #include <gnuradio/io_signature.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
+#include <ctime>
 #include <deque>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -78,6 +85,55 @@ std::vector<float> bilinear_resize(const std::vector<float> &src,
         }
     return dst;
 }
+
+std::string iso_timestamp_now()
+{
+    using namespace std::chrono;
+    const auto now = system_clock::now();
+    const auto ms = duration_cast<milliseconds>(now.time_since_epoch()).count() % 1000;
+    const std::time_t t = system_clock::to_time_t(now);
+    std::tm tm_utc{};
+    gmtime_r(&t, &tm_utc);
+    std::ostringstream oss;
+    oss << std::put_time(&tm_utc, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3) << ms << 'Z';
+    return oss.str();
+}
+
+const char *jammer_type_name(JammerType jammer)
+{
+    switch (jammer)
+        {
+        case JammerType::NARROW_BAND:
+            return "Narrow Band";
+        case JammerType::NOJAM:
+            return "No Jam";
+        case JammerType::SINGLE_AM:
+            return "Single AM";
+        case JammerType::SINGLE_FM:
+            return "Single FM";
+        case JammerType::SINGLE_CHIRP:
+            return "Single Chirp";
+        case JammerType::PULSED:
+            return "DME (Pulsed)";
+        }
+    return "Unknown";
+}
+
+const char *filter_name(int command_id)
+{
+    switch (command_id)
+        {
+        case FILTER_CMD_PASS_THROUGH:
+            return "Pass_Through";
+        case FILTER_CMD_NOTCH:
+            return "Notch";
+        case FILTER_CMD_PULSE_BLANKING:
+            return "Pulse_Blanking";
+        case FILTER_CMD_NOTCH_LITE:
+            return "Notch_Lite";
+        }
+    return "Unknown";
+}
 }  // namespace
 
 
@@ -87,6 +143,7 @@ public:
            int window_size,
            int update_interval,
            const std::string &model_path,
+           const std::string &log_dir,
            std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> queue)
         : window_size_(window_size),
           update_interval_(update_interval),
@@ -97,6 +154,16 @@ public:
         if (window_size_ < kStftFftSize)
             throw std::invalid_argument(
                 "DeepLearningBlock: window_size must be >= " + std::to_string(kStftFftSize));
+
+        const fs::path dir(log_dir);
+        fs::create_directories(dir);
+        spectrogram_preview_path_ = (dir / "spectrogram_live.pgm").string();
+
+        inference_log_.open((dir / "inference_log.csv").string(), std::ios::trunc);
+        inference_log_ << "timestamp_utc,stft_latency_ms,onnx_latency_ms,total_latency_ms,jammer_type\n";
+
+        filter_log_.open((dir / "filter_switch_log.csv").string(), std::ios::trunc);
+        filter_log_ << "timestamp_utc,from_filter,to_filter\n";
 
         const OrtPathString ort_model_path(model_path.begin(), model_path.end());
         om_ = new OnnxModel(ort_model_path);
@@ -135,6 +202,11 @@ public:
     bool has_work_{false};
     bool stop_{false};
 
+    int last_command_id_{FILTER_CMD_PASS_THROUGH};
+    std::string spectrogram_preview_path_;
+    std::ofstream inference_log_;
+    std::ofstream filter_log_;
+
     std::vector<float> compute_spectrogram(const std::vector<gr_complex> &samples);
     JammerType run_inference(const std::vector<float> &spectrogram);
     void send_filter_command(JammerType jammer_type);
@@ -142,6 +214,8 @@ public:
 
 private:
     void worker_loop();
+    void write_spectrogram_preview(const std::vector<float> &spectrogram);
+    void log_inference(const char *jammer_str, double stft_ms, double onnx_ms, double total_ms);
 
     DeepLearningBlock *p_{nullptr};
     OnnxModel *om_{nullptr};
@@ -185,7 +259,33 @@ std::vector<float> DeepLearningBlock::Opaque::compute_spectrogram(
     for (float &v : raw)
         v = (v - min_db) / range * 255.0f;
 
-    return bilinear_resize(raw, n_frames, kStftFftSize, kModelWidth, kModelHeight);
+    auto resized = bilinear_resize(raw, n_frames, kStftFftSize, kModelWidth, kModelHeight);
+    write_spectrogram_preview(resized);
+    return resized;
+}
+
+
+void DeepLearningBlock::Opaque::write_spectrogram_preview(const std::vector<float> &spectrogram)
+{
+    // Nadpisywany plik PGM z najnowszym oknem STFT - do podgladu na zywo
+    // (np. `feh --reload 1 spectrogram_live.pgm`). Pisanie do pliku tymczasowego
+    // + rename jest atomowe, zeby viewer nigdy nie zlapal pol-zapisanego pliku.
+    const std::string tmp_path = spectrogram_preview_path_ + ".tmp";
+    std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
+    if (!f)
+        return;
+
+    f << "P5\n" << kModelWidth << " " << kModelHeight << "\n255\n";
+    std::vector<uint8_t> pixels(spectrogram.size());
+    for (size_t i = 0; i < spectrogram.size(); ++i)
+        pixels[i] = static_cast<uint8_t>(std::clamp(spectrogram[i], 0.0f, 255.0f));
+    f.write(reinterpret_cast<const char *>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+    f.close();
+
+    errorlib::error_code ec;
+    fs::rename(tmp_path, spectrogram_preview_path_, ec);
+    if (ec)
+        std::cerr << "DeepLearningBlock: could not update spectrogram preview: " << ec.message() << "\n";
 }
 
 
@@ -215,9 +315,6 @@ JammerType DeepLearningBlock::Opaque::run_inference(
 
 void DeepLearningBlock::Opaque::send_filter_command(JammerType jammer_type)
 {
-    if (!control_queue_)
-        return;
-
     int command_id = FILTER_CMD_PASS_THROUGH;
     switch (jammer_type)
         {
@@ -237,9 +334,33 @@ void DeepLearningBlock::Opaque::send_filter_command(JammerType jammer_type)
             break;
         }
 
+    if (command_id != last_command_id_)
+        {
+            if (filter_log_.is_open())
+                {
+                    filter_log_ << iso_timestamp_now() << ','
+                                << filter_name(last_command_id_) << ','
+                                << filter_name(command_id) << '\n';
+                    filter_log_.flush();
+                }
+            last_command_id_ = command_id;
+        }
+
+    if (!control_queue_)
+        return;
+
     // identyczne z TcpCmdInterface::set_input_filter(), event_type=30
     const command_event_sptr new_evnt = command_event_make(command_id, 30);
     control_queue_->push(pmt::make_any(new_evnt));
+}
+
+
+void DeepLearningBlock::Opaque::log_inference(const char *jammer_str, double stft_ms, double onnx_ms, double total_ms)
+{
+    if (!inference_log_.is_open())
+        return;
+    inference_log_ << iso_timestamp_now() << ',' << stft_ms << ',' << onnx_ms << ',' << total_ms << ',' << jammer_str << '\n';
+    inference_log_.flush();
 }
 
 
@@ -277,19 +398,21 @@ void DeepLearningBlock::Opaque::worker_loop()
 
             try
                 {
+                    const auto t0 = std::chrono::steady_clock::now();
                     auto spectrogram = compute_spectrogram(window);
+                    const auto t1 = std::chrono::steady_clock::now();
                     auto jammer = run_inference(spectrogram);
-                    std::string jammer_str;
-                    switch (jammer)
-                        {
-                        case JammerType::NARROW_BAND: jammer_str = "Narrow Band"; break;
-                        case JammerType::NOJAM: jammer_str = "No Jam"; break;
-                        case JammerType::SINGLE_AM: jammer_str = "Single AM"; break;
-                        case JammerType::SINGLE_FM: jammer_str = "SINGLE FM"; break;
-                        case JammerType::SINGLE_CHIRP: jammer_str = "SINGLE CHIRP"; break;
-                        case JammerType::PULSED: jammer_str = "DME: Pulsed"; break;
-                        }
-                    std::cout << "Inference: " << jammer_str << "\n";
+                    const auto t2 = std::chrono::steady_clock::now();
+
+                    const double stft_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+                    const double onnx_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+                    const double total_ms = std::chrono::duration<double, std::milli>(t2 - t0).count();
+                    const char *jammer_str = jammer_type_name(jammer);
+
+                    std::cout << "Inference: " << jammer_str
+                              << " (STFT " << stft_ms << " ms, ONNX " << onnx_ms << " ms)\n";
+
+                    log_inference(jammer_str, stft_ms, onnx_ms, total_ms);
                     send_filter_command(jammer);
                 }
             catch (const std::exception &e)
@@ -306,9 +429,10 @@ DeepLearningBlock::sptr DeepLearningBlock::make(
     int window_size,
     int update_interval,
     const std::string &model_path,
+    const std::string &log_dir,
     std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue)
 {
-    return sptr(new DeepLearningBlock(window_size, update_interval, model_path, std::move(control_queue)));
+    return sptr(new DeepLearningBlock(window_size, update_interval, model_path, log_dir, std::move(control_queue)));
 }
 
 
@@ -316,11 +440,12 @@ DeepLearningBlock::DeepLearningBlock(
     int window_size,
     int update_interval,
     const std::string &model_path,
+    const std::string &log_dir,
     std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue)
     : gr::block("DeepLearningBlock",
           gr::io_signature::make(1, 1, sizeof(gr_complex)),
           gr::io_signature::make(0, 0, 0)),
-      o_(new Opaque(this, window_size, update_interval, model_path, std::move(control_queue)))
+      o_(new Opaque(this, window_size, update_interval, model_path, log_dir, std::move(control_queue)))
 {
 }
 
