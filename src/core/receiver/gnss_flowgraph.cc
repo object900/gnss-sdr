@@ -523,20 +523,30 @@ int GNSSFlowgraph::connect_desktop_flowgraph()
             return 1;
         }
 
-    deep_learning_block_ = DeepLearningBlock::make(512, queue_);
-    {
-        auto sig_cond = std::dynamic_pointer_cast<SignalConditioner>(sig_conditioner_.at(0));
-        if (sig_cond)
-            {
-                // tap after DataTypeAdapter, before InputFilter — unfiltered gr_complex
-                top_block_->connect(sig_cond->data_type_adapter()->get_right_block(), 0,
-                    deep_learning_block_, 0);
-            }
-        else
-            {
-                LOG(WARNING) << "DeepLearningBlock: could not cast to SignalConditioner, skipping tap";
-            }
-    }
+    const auto deep_learning_model_path = configuration_->property("DeepLearningBlock.model_path", std::string(""));
+    if (deep_learning_model_path.empty())
+        {
+            LOG(WARNING) << "DeepLearningBlock.model_path not set, skipping DeepLearningBlock";
+        }
+    else
+        {
+            const int deep_learning_window_size = configuration_->property("DeepLearningBlock.window_size", 512);
+            const int deep_learning_update_interval = configuration_->property("DeepLearningBlock.update_interval", deep_learning_window_size);
+            deep_learning_block_ = DeepLearningBlock::make(
+                deep_learning_window_size, deep_learning_update_interval, deep_learning_model_path, queue_);
+
+            auto sig_cond = std::dynamic_pointer_cast<SignalConditioner>(sig_conditioner_.at(0));
+            if (sig_cond)
+                {
+                    // tap after DataTypeAdapter, before InputFilter — unfiltered gr_complex
+                    top_block_->connect(sig_cond->data_type_adapter()->get_right_block(), 0,
+                        deep_learning_block_, 0);
+                }
+            else
+                {
+                    LOG(WARNING) << "DeepLearningBlock: could not cast to SignalConditioner, skipping tap";
+                }
+        }
 
     if (connect_sample_counter() != 0)
         {
