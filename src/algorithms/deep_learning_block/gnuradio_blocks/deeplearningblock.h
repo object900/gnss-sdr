@@ -8,23 +8,27 @@
 #include <memory>
 #include <string>
 
+// Kolejnosc MUSI byc dokladnie taka jak CLASSES w models/ResNet18.ipynb
 enum class JammerType {
-    NOJAM, SINGLE_AM, SINGLE_FM, SINGLE_CHIRP, PULSED, NARROW_BAND
+    CW, FM, CHIRP, PULSED, NARROWBAND, NOJAM
 };
 
 class DeepLearningBlock : public gr::block {
 public:
     using sptr = std::shared_ptr<DeepLearningBlock>;
 
-    // window_size: liczba probek IQ skladajacych sie na jedno okno analizy STFT.
-    // update_interval: co ile nowych probek bufor (okno) jest odswiezany i
-    //   ponownie podawany do STFT + inferencji (hop sliding window; dla
-    //   update_interval == window_size zachowanie jak poprzednio: bez nakladania).
+    // window_size: liczba probek IQ skladajacych sie na jedno okno analizy STFT
+    //   (bufor przesuwny -- po zapelnieniu zawsze trzyma ostatnie window_size
+    //   probek).
+    // Brak osobnego "update_interval": okno jest dispatchowane do inferencji
+    //   NATYCHMIAST gdy tylko watek roboczy jest wolny (patrz general_work()/
+    //   dispatch() w .cpp) -- worker sam ogranicza tempo wlasnym czasem
+    //   przetwarzania (STFT+ONNX), wiec sztywny throttle nie jest potrzebny do
+    //   poprawnosci i tylko zwiekszalby opoznienie reakcji na zmiane sygnalu.
     // log_dir: katalog, w ktorym blok zapisuje spectrogram_live.pgm (podglad na
     //   zywo ostatniego okna STFT), inference_log.csv (werdykt + latencja STFT/ONNX
     //   dla kazdej inferencji) i filter_switch_log.csv (momenty przelaczania filtra).
     static sptr make(int window_size,
-                     int update_interval,
                      const std::string &model_path,
                      const std::string &log_dir,
                      std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue);
@@ -38,7 +42,6 @@ public:
 
 private:
     DeepLearningBlock(int window_size,
-                      int update_interval,
                       const std::string &model_path,
                       const std::string &log_dir,
                       std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue);

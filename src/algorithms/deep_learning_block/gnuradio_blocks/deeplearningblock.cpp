@@ -1,13 +1,14 @@
 #include "deeplearningblock.h"
-#include "gnss_sdr_fft.h"
 #include "gnss_sdr_filesystem.h"
 #include "onnx_model.h"
+#include "stft_input.h"
 #include <gnuradio/io_signature.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
@@ -28,63 +29,13 @@ static constexpr int FILTER_CMD_PULSE_BLANKING  = 303;
 static constexpr int FILTER_CMD_NOTCH_LITE      = 304;
 
 namespace {
-// Wymiary wejscia sieci - musi sie zgadzac z modelem .onnx (zob. modules/neural_network/src/main.cpp)
-constexpr int kModelWidth = 512;
-constexpr int kModelHeight = 512;
-
-// Rozmiar pojedynczej ramki STFT i przesuniecie miedzy ramkami (50% nakladania)
-constexpr int kStftFftSize = 256;
-constexpr int kStftHop = kStftFftSize / 2;
-constexpr float kPi = 3.14159265358979323846f;
-
-const std::vector<float> &hamming_window()
-{
-    static const std::vector<float> w = [] {
-        std::vector<float> win(kStftFftSize);
-        for (int n = 0; n < kStftFftSize; ++n)
-            win[n] = 0.54f - 0.46f * std::cos(2.0f * kPi * static_cast<float>(n) / (kStftFftSize - 1));
-        return win;
-    }();
-    return w;
-}
-
-// Skaluje obraz src_w x src_h (row-major) do dst_w x dst_h interpolacja biliniowa,
-// identycznie jak resize w modules/neural_network/src/image_loader.cpp
-std::vector<float> bilinear_resize(const std::vector<float> &src,
-    int src_w, int src_h, int dst_w, int dst_h)
-{
-    if (src_w == dst_w && src_h == dst_h)
-        return src;
-
-    std::vector<float> dst(static_cast<size_t>(dst_w) * dst_h);
-    const float sx = static_cast<float>(src_w) / dst_w;
-    const float sy = static_cast<float>(src_h) / dst_h;
-
-    for (int oy = 0; oy < dst_h; ++oy)
-        {
-            float fy = (oy + 0.5f) * sy - 0.5f;
-            int y0 = static_cast<int>(std::floor(fy));
-            int y1 = y0 + 1;
-            float dy = fy - y0;
-            y0 = std::clamp(y0, 0, src_h - 1);
-            y1 = std::clamp(y1, 0, src_h - 1);
-
-            for (int ox = 0; ox < dst_w; ++ox)
-                {
-                    float fx = (ox + 0.5f) * sx - 0.5f;
-                    int x0 = static_cast<int>(std::floor(fx));
-                    int x1 = x0 + 1;
-                    float dx = fx - x0;
-                    x0 = std::clamp(x0, 0, src_w - 1);
-                    x1 = std::clamp(x1, 0, src_w - 1);
-
-                    float v = (1 - dy) * ((1 - dx) * src[y0 * src_w + x0] + dx * src[y0 * src_w + x1])
-                            +      dy  * ((1 - dx) * src[y1 * src_w + x0] + dx * src[y1 * src_w + x1]);
-                    dst[oy * dst_w + ox] = v;
-                }
-        }
-    return dst;
-}
+// Parametry STFT -- MUSZA byc identyczne jak przy generowaniu danych treningowych
+// (03_Kod/modules/jammers/Constants.py: Nps_n=128 (nperseg), OVERLAP=0.75,
+// WINDOW_FUNCTION="hann"; patrz tez GenerateDatasets.py).
+// Sam STFT + normalizacja licza sie w compute_stft_input()/normalize_mag_db() (modules/neural_network/include/stft_input.h), zeby nie utrzymywac dwoch kopii tej samej logiki i nie ryzykowac ich rozjechania.
+constexpr int kStftNperseg = 128;
+constexpr double kStftOverlap = 0.75;
+constexpr double kStftClipDb = 60.0;
 
 std::string iso_timestamp_now()
 {
@@ -103,18 +54,18 @@ const char *jammer_type_name(JammerType jammer)
 {
     switch (jammer)
         {
-        case JammerType::NARROW_BAND:
-            return "Narrow Band";
+        case JammerType::CHIRP:
+            return "Chirp";
+        case JammerType::CW:
+            return "CW";
+        case JammerType::FM:
+            return "FM";
+        case JammerType::NARROWBAND:
+            return "Narrowband";
         case JammerType::NOJAM:
             return "No Jam";
-        case JammerType::SINGLE_AM:
-            return "Single AM";
-        case JammerType::SINGLE_FM:
-            return "Single FM";
-        case JammerType::SINGLE_CHIRP:
-            return "Single Chirp";
         case JammerType::PULSED:
-            return "DME (Pulsed)";
+            return "Pulsed";
         }
     return "Unknown";
 }
@@ -141,19 +92,16 @@ class DeepLearningBlock::Opaque {
 public:
     Opaque(DeepLearningBlock *parent,
            int window_size,
-           int update_interval,
            const std::string &model_path,
            const std::string &log_dir,
            std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> queue)
         : window_size_(window_size),
-          update_interval_(update_interval),
           control_queue_(std::move(queue)),
-          fft_(gnss_fft_fwd_make_unique(kStftFftSize)),
           p_(parent)
     {
-        if (window_size_ < kStftFftSize)
+        if (window_size_ < kStftNperseg)
             throw std::invalid_argument(
-                "DeepLearningBlock: window_size must be >= " + std::to_string(kStftFftSize));
+                "DeepLearningBlock: window_size must be >= " + std::to_string(kStftNperseg));
 
         const fs::path dir(log_dir);
         fs::create_directories(dir);
@@ -187,11 +135,8 @@ public:
     }
 
     int window_size_;
-    int update_interval_;
-    int samples_since_update_{0};
     std::deque<gr_complex> buffer_;
     std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue_;
-    std::unique_ptr<gnss_fft_complex_fwd> fft_;
 
     // true gdy worker_thread_ aktualnie przetwarza okno - wtedy general_work()
     // odrzuca (drop) nowe okno zamiast czekac, zeby nie zatrzymywac realtime sciezki.
@@ -207,14 +152,14 @@ public:
     std::ofstream inference_log_;
     std::ofstream filter_log_;
 
-    std::vector<float> compute_spectrogram(const std::vector<gr_complex> &samples);
-    JammerType run_inference(const std::vector<float> &spectrogram);
+    StftInput compute_spectrogram(const std::vector<gr_complex> &samples);
+    JammerType run_inference(const StftInput &spectrogram);
     void send_filter_command(JammerType jammer_type);
     void dispatch(const std::deque<gr_complex> &window);
 
 private:
     void worker_loop();
-    void write_spectrogram_preview(const std::vector<float> &spectrogram);
+    void write_spectrogram_preview(const StftInput &spectrogram);
     void log_inference(const char *jammer_str, double stft_ms, double onnx_ms, double total_ms);
 
     DeepLearningBlock *p_{nullptr};
@@ -223,62 +168,41 @@ private:
 };
 
 
-std::vector<float> DeepLearningBlock::Opaque::compute_spectrogram(
+StftInput DeepLearningBlock::Opaque::compute_spectrogram(
     const std::vector<gr_complex> &samples)
 {
-    const int n_frames = (static_cast<int>(samples.size()) - kStftFftSize) / kStftHop + 1;
-    const auto &window = hamming_window();
+    // gr_complex JEST std::complex<float> w GNU Radio, wiec to zwykla kopia,
+    // nie konwersja. compute_stft_input() robi STFT (okno Hanna periodyczne,
+    // fftshift) ORAZ normalizacje (odjecie maksimum, clip do [-kStftClipDb,0],
+    // skala do [0,1]) -- ten sam wzor co Stft.go_stft()/GenerateDatasets.py w
+    // treningu Pythonowym (JammerSTFTDataset), wiec wejscie do sieci jest tu
+    // gwarantowane identyczne jak przy treningu, bez potrzeby generowania/
+    // skalowania zadnego obrazu.
+    const std::vector<std::complex<float>> iq(samples.begin(), samples.end());
+    StftInput spectrogram = compute_stft_input(
+        iq, static_cast<int>(samples.size()), kStftNperseg, kStftOverlap, kStftClipDb);
 
-    // raw[freq_bin][frame], DC przesunieta do srodka (fftshift), row-major z szerokoscia n_frames
-    std::vector<float> raw(static_cast<size_t>(kStftFftSize) * n_frames);
-
-    for (int f = 0; f < n_frames; ++f)
-        {
-            const int offset = f * kStftHop;
-            gr_complex *in = fft_->get_inbuf();
-            for (int n = 0; n < kStftFftSize; ++n)
-                in[n] = samples[offset + n] * window[n];
-
-            fft_->execute();
-
-            const gr_complex *out = fft_->get_outbuf();
-            for (int k = 0; k < kStftFftSize; ++k)
-                {
-                    const int shifted = (k + kStftFftSize / 2) % kStftFftSize;
-                    const float mag = std::abs(out[k]);
-                    raw[static_cast<size_t>(shifted) * n_frames + f] = 20.0f * std::log10(mag + 1e-12f);
-                }
-        }
-
-    const float min_db = *std::min_element(raw.begin(), raw.end());
-    const float max_db = *std::max_element(raw.begin(), raw.end());
-    const float range = std::max(max_db - min_db, 1e-6f);
-
-    // Normalizacja do [0, 255], tak jak grayscale BMP w load_bmp_grayscale,
-    // zeby skala wejscia odpowiadala temu, na czym siec byla trenowana.
-    for (float &v : raw)
-        v = (v - min_db) / range * 255.0f;
-
-    auto resized = bilinear_resize(raw, n_frames, kStftFftSize, kModelWidth, kModelHeight);
-    write_spectrogram_preview(resized);
-    return resized;
+    write_spectrogram_preview(spectrogram);
+    return spectrogram;
 }
 
 
-void DeepLearningBlock::Opaque::write_spectrogram_preview(const std::vector<float> &spectrogram)
+void DeepLearningBlock::Opaque::write_spectrogram_preview(const StftInput &spectrogram)
 {
     // Nadpisywany plik PGM z najnowszym oknem STFT - do podgladu na zywo
     // (np. `feh --reload 1 spectrogram_live.pgm`). Pisanie do pliku tymczasowego
     // + rename jest atomowe, zeby viewer nigdy nie zlapal pol-zapisanego pliku.
+    // spectrogram.data jest juz znormalizowany do [0,1] (patrz compute_stft_input),
+    // wiec do PGM (0-255) trzeba go tylko przeskalowac z powrotem.
     const std::string tmp_path = spectrogram_preview_path_ + ".tmp";
     std::ofstream f(tmp_path, std::ios::binary | std::ios::trunc);
     if (!f)
         return;
 
-    f << "P5\n" << kModelWidth << " " << kModelHeight << "\n255\n";
-    std::vector<uint8_t> pixels(spectrogram.size());
-    for (size_t i = 0; i < spectrogram.size(); ++i)
-        pixels[i] = static_cast<uint8_t>(std::clamp(spectrogram[i], 0.0f, 255.0f));
+    f << "P5\n" << spectrogram.n_frames << " " << spectrogram.n_freq << "\n255\n";
+    std::vector<uint8_t> pixels(spectrogram.data.size());
+    for (size_t i = 0; i < spectrogram.data.size(); ++i)
+        pixels[i] = static_cast<uint8_t>(std::clamp(spectrogram.data[i] * 255.0f, 0.0f, 255.0f));
     f.write(reinterpret_cast<const char *>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
     f.close();
 
@@ -290,21 +214,21 @@ void DeepLearningBlock::Opaque::write_spectrogram_preview(const std::vector<floa
 
 
 JammerType DeepLearningBlock::Opaque::run_inference(
-    const std::vector<float> &spectrogram)
+    const StftInput &spectrogram)
 {
-    // Kolejnosc klas modelu jest alfabetyczna (zob. main.cpp): DME, NB, NoJam,
-    // Single AM, Single Chirp, Single FM. DME ~ PULSED, NB ~ NARROW_BAND.
+    // Kolejnosc klas modelu = CLASSES z models/ResNet18.ipynb 
+    // Musi 1:1 odpowiadac JammerType (patrz deeplearningblock.h).
     static constexpr std::array<JammerType, 6> kClassToJammer = {
+        JammerType::CW,
+        JammerType::FM,
+        JammerType::CHIRP,
         JammerType::PULSED,
-        JammerType::NARROW_BAND,
+        JammerType::NARROWBAND,
         JammerType::NOJAM,
-        JammerType::SINGLE_AM,
-        JammerType::SINGLE_CHIRP,
-        JammerType::SINGLE_FM,
     };
 
-    const std::vector<int64_t> input_shape = {1, 1, kModelHeight, kModelWidth};
-    const auto output = om_->run(spectrogram, input_shape);
+    const std::vector<int64_t> input_shape = {1, 1, spectrogram.n_freq, spectrogram.n_frames};
+    const auto output = om_->run(spectrogram.data, input_shape);
 
     const auto max_it = std::max_element(output.begin(), output.end());
     const auto class_index = static_cast<size_t>(std::distance(output.begin(), max_it));
@@ -318,17 +242,15 @@ void DeepLearningBlock::Opaque::send_filter_command(JammerType jammer_type)
     int command_id = FILTER_CMD_PASS_THROUGH;
     switch (jammer_type)
         {
-        case JammerType::SINGLE_AM:
-        case JammerType::SINGLE_FM:
-        case JammerType::NARROW_BAND:
+        case JammerType::CW:
+        case JammerType::FM:
+        case JammerType::CHIRP:
             command_id = FILTER_CMD_NOTCH;
             break;
         case JammerType::PULSED:
             command_id = FILTER_CMD_PULSE_BLANKING;
             break;
-        case JammerType::SINGLE_CHIRP:
-            command_id = FILTER_CMD_NOTCH_LITE;
-            break;
+        case JammerType::NARROWBAND:
         case JammerType::NOJAM:
             command_id = FILTER_CMD_PASS_THROUGH;
             break;
@@ -366,9 +288,14 @@ void DeepLearningBlock::Opaque::log_inference(const char *jammer_str, double stf
 
 void DeepLearningBlock::Opaque::dispatch(const std::deque<gr_complex> &window)
 {
+    // Caller (general_work()) only invokes this once it has already observed
+    // busy_ == false, so this check is a defensive fallback against the
+    // (expected to be essentially impossible, single-producer) race where
+    // busy_ flips true again between that check and this call -- if it ever
+    // fires it's worth knowing about, hence still logged.
     if (busy_.load(std::memory_order_acquire))
         {
-            std::cerr << "DeepLearningBlock: worker busy, dropping window\n";
+            std::cerr << "DeepLearningBlock: worker unexpectedly busy, dropping window\n";
             return;
         }
 
@@ -427,25 +354,23 @@ void DeepLearningBlock::Opaque::worker_loop()
 
 DeepLearningBlock::sptr DeepLearningBlock::make(
     int window_size,
-    int update_interval,
     const std::string &model_path,
     const std::string &log_dir,
     std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue)
 {
-    return sptr(new DeepLearningBlock(window_size, update_interval, model_path, log_dir, std::move(control_queue)));
+    return sptr(new DeepLearningBlock(window_size, model_path, log_dir, std::move(control_queue)));
 }
 
 
 DeepLearningBlock::DeepLearningBlock(
     int window_size,
-    int update_interval,
     const std::string &model_path,
     const std::string &log_dir,
     std::shared_ptr<Concurrent_Queue<pmt::pmt_t>> control_queue)
     : gr::block("DeepLearningBlock",
           gr::io_signature::make(1, 1, sizeof(gr_complex)),
           gr::io_signature::make(0, 0, 0)),
-      o_(new Opaque(this, window_size, update_interval, model_path, log_dir, std::move(control_queue)))
+      o_(new Opaque(this, window_size, model_path, log_dir, std::move(control_queue)))
 {
 }
 
@@ -470,12 +395,15 @@ int DeepLearningBlock::general_work(int /*noutput_items*/,
             if (static_cast<int>(o_->buffer_.size()) > o_->window_size_)
                 o_->buffer_.pop_front();
 
-            ++o_->samples_since_update_;
-
+            // Dispatch the freshest full window as soon as the worker is free --
+            // no fixed interval to wait out. The worker's own processing time
+            // (STFT+ONNX) is what naturally paces how often this actually
+            // triggers; checking busy_ here (instead of only inside dispatch())
+            // avoids calling dispatch() -- and its defensive drop-log -- on
+            // every sample while the worker is still busy.
             if (static_cast<int>(o_->buffer_.size()) == o_->window_size_ &&
-                o_->samples_since_update_ >= o_->update_interval_)
+                !o_->busy_.load(std::memory_order_acquire))
                 {
-                    o_->samples_since_update_ = 0;
                     o_->dispatch(o_->buffer_);
                 }
         }

@@ -25,6 +25,7 @@ find_library(ONNXRUNTIME_LIB
 set(DATA_TYPE_GR_BLOCKS_SOURCES
     deeplearningblock.cpp
     ${NEURAL_NETWORK_ROOT}/src/onnx_model.cpp
+    ${NEURAL_NETWORK_ROOT}/src/stft_input.cpp
 )
 
 set(DATA_TYPE_GR_BLOCKS_HEADERS
