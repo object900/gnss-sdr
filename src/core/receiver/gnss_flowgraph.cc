@@ -523,8 +523,27 @@ int GNSSFlowgraph::connect_desktop_flowgraph()
             return 1;
         }
 
+    // Diagnostic-only flag: taps the same point as DeepLearningBlock with a plain
+    // gr::blocks::null_sink instead of real STFT+ONNX inference, to isolate whether
+    // an observed timing effect comes from merely having a second reader on this
+    // port (GNU Radio buffer/scheduling negotiation) or from the actual CNN compute.
+    const bool deep_learning_dummy_tap = configuration_->property("DeepLearningBlock.dummy_tap", false);
     const auto deep_learning_model_path = configuration_->property("DeepLearningBlock.model_path", std::string(""));
-    if (deep_learning_model_path.empty())
+    if (deep_learning_dummy_tap)
+        {
+            auto sig_cond = std::dynamic_pointer_cast<SignalConditioner>(sig_conditioner_.at(0));
+            if (sig_cond)
+                {
+                    null_sinks_.push_back(gr::blocks::null_sink::make(sizeof(gr_complex)));
+                    top_block_->connect(sig_cond->data_type_adapter()->get_right_block(), 0,
+                        null_sinks_.back(), 0);
+                }
+            else
+                {
+                    LOG(WARNING) << "DeepLearningBlock.dummy_tap: could not cast to SignalConditioner, skipping tap";
+                }
+        }
+    else if (deep_learning_model_path.empty())
         {
             LOG(WARNING) << "DeepLearningBlock.model_path not set, skipping DeepLearningBlock";
         }
@@ -1951,11 +1970,14 @@ void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
 
                 // Fast path for Notch/PulseBlanking toggling: atomically flip enabled flags
                 // without any flowgraph lock/unlock, which would pause sample delivery
-                // and cause tracking loops to lose lock. Modes are mutually exclusive.
-                if (who == 301 || who == 302 || who == 303)
+                // and cause tracking loops to lose lock. 301/302/303 are mutually
+                // exclusive; 305 is the odd one out, enabling both at once (e.g. for a
+                // static ANF+PB-in-series run triggered by telecommand instead of
+                // NotchFilter/PulseBlankingFilter.enabled_at_start in the config file).
+                if (who == 301 || who == 302 || who == 303 || who == 305)
                     {
-                        const bool enable_notch = (who == 302);
-                        const bool enable_pb = (who == 303);
+                        const bool enable_notch = (who == 302 || who == 305);
+                        const bool enable_pb = (who == 303 || who == 305);
                         NotchFilter::set_all_enabled(enable_notch);
                         PulseBlankingFilter::set_all_enabled(enable_pb);
                         if (who == 301)
@@ -1966,9 +1988,13 @@ void GNSSFlowgraph::apply_action(unsigned int who, unsigned int what)
                             {
                                 LOG(INFO) << "Runtime input filter: Notch_Filter active, PulseBlanking bypassed";
                             }
-                        else
+                        else if (who == 303)
                             {
                                 LOG(INFO) << "Runtime input filter: Pulse_Blanking_Filter active, Notch bypassed";
+                            }
+                        else
+                            {
+                                LOG(INFO) << "Runtime input filter: Notch_Filter + Pulse_Blanking_Filter both active";
                             }
                         break;
                     }

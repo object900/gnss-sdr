@@ -53,6 +53,10 @@ NotchFilter::NotchFilter(const ConfigurationInterface* configuration,
     const int length_ = configuration->property(role + ".length", default_length_);
     const int n_segments_est = configuration->property(role + ".segments_est", default_n_segments_est);
     const int n_segments_reset = configuration->property(role + ".segments_reset", default_n_segments_reset);
+    // Static override for configs with no DeepLearningBlock/telecommands driving
+    // set_all_enabled() at runtime -- everywhere else this stays false (bypass),
+    // same as before this property existed.
+    const bool enabled_at_start = configuration->property(role + ".enabled_at_start", false);
 
     dump_filename_ = configuration->property(role + ".dump_filename", default_dump_file);
     item_type_ = configuration->property(role + ".item_type", default_item_type);
@@ -66,6 +70,7 @@ NotchFilter::NotchFilter(const ConfigurationInterface* configuration,
             DLOG(INFO) << "input filter(" << notch_filter_->unique_id() << ")";
             std::lock_guard<std::mutex> lock(registry_mutex_);
             registry_.push_back(notch_filter_);
+            notch_filter_->set_enabled(enabled_at_start);
         }
     else
         {

@@ -95,7 +95,7 @@ int Notch::general_work(int noutput_items, gr_vector_int &ninput_items __attribu
 
             work_iterations_++;
             // Optional heartbeat for deep debugging without flooding logs.
-            if (work_iterations_ % 100000ULL == 0ULL)
+            if (work_iterations_ % 10000000ULL == 0ULL)
                 {
                     std::cout << "[Notch] Iter: " << work_iterations_ << "\n";
                 }

@@ -25,17 +25,28 @@
 """
 
 import math
+import os
 import struct
 import numpy as np
+
+# Record size without / with the trailing reference-channel sample counter
+# (see rtklib_solver.cc's PVT dump write block) -- used to auto-detect
+# whether a given .dat file predates that field, since old and new files
+# can both be lying around on disk.
+_OLD_RECORD_SIZE_BYTES = 187
+_NEW_RECORD_SIZE_BYTES = 195
 
 
 def gps_l1_ca_read_pvt_dump(filename):
 
     uint8_size_bytes = 1
     uint32_size_bytes = 4
+    uint64_size_bytes = 8
     double_size_bytes = 8
     float_size_bytes = 4
     bytes_shift = 0
+
+    has_sample_index = os.path.getsize(filename) % _NEW_RECORD_SIZE_BYTES == 0
 
     TOW = []
     WEEK =[]
@@ -65,6 +76,7 @@ def gps_l1_ca_read_pvt_dump(filename):
     PDOP = []
     HDOP = []
     VDOP = []
+    Sample_Index = []
 
     f = open(filename, 'rb')
     if f is None:
@@ -200,6 +212,14 @@ def gps_l1_ca_read_pvt_dump(filename):
                                       f.read(double_size_bytes))[0])
             bytes_shift += double_size_bytes
             f.seek(bytes_shift, 0)
+            # Reference channel's tracking sample counter (post-Resampler
+            # rate, same quantity tracking_ch*.dat's PRN_start_sample comes
+            # from) -> uint64. Only present in newer dumps (see has_sample_index).
+            if has_sample_index:
+                Sample_Index.append(struct.unpack('Q',
+                                                  f.read(uint64_size_bytes))[0])
+                bytes_shift += uint64_size_bytes
+                f.seek(bytes_shift, 0)
 
             # Check file
             linea = f.readline()
@@ -243,7 +263,8 @@ def gps_l1_ca_read_pvt_dump(filename):
         'GDOP': np.array(GDOP),
         'PDOP': np.array(PDOP),
         'HDOP': np.array(HDOP),
-        'VDOP': np.array(VDOP)
+        'VDOP': np.array(VDOP),
+        'Sample_Index': Sample_Index if has_sample_index else None
     }
 
     return navSolutions

@@ -67,6 +67,7 @@ private:
     int32_t n_segments_reset_;
     int32_t n_deg_fred_;
     bool last_filtered_;
+    bool was_enabled_;
 };
 
 

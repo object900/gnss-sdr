@@ -56,6 +56,10 @@ PulseBlankingFilter::PulseBlankingFilter(const ConfigurationInterface* configura
     const double default_if = 0.0;
     const double if_aux = configuration->property(role_ + ".if", default_if);
     const double if_ = configuration->property(role_ + ".IF", if_aux);
+    // Static override for configs with no DeepLearningBlock/telecommands driving
+    // set_all_enabled() at runtime -- everywhere else this stays false (bypass),
+    // same as before this property existed.
+    const bool enabled_at_start = configuration->property(role_ + ".enabled_at_start", false);
 
     dump_filename_ = configuration->property(role_ + ".dump_filename", default_dump_filename);
     item_type_ = configuration->property(role_ + ".item_type", default_item_type);
@@ -70,6 +74,7 @@ PulseBlankingFilter::PulseBlankingFilter(const ConfigurationInterface* configura
             pulse_blanking_cc_ = make_pulse_blanking_cc(pfa, length_, n_segments_est, n_segments_reset);
             std::lock_guard<std::mutex> lock(registry_mutex_);
             registry_.push_back(pulse_blanking_cc_);
+            pulse_blanking_cc_->set_enabled(enabled_at_start);
         }
     else
         {

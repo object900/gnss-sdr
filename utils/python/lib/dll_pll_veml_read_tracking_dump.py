@@ -52,6 +52,8 @@ def dll_pll_veml_read_tracking_dump (filename):
     v20 = []
     v21 = []
     v22 = []
+    v23 = []
+    v24 = []
     GNSS_tracking = {}
 
     bytes_shift = 0
@@ -188,6 +190,15 @@ def dll_pll_veml_read_tracking_dump (filename):
                                      f.read(unsigned_int_size_bytes))[0])
             bytes_shift += unsigned_int_size_bytes
             f.seek(bytes_shift, 0)
+            # TOW -> Time of week, in ms.
+            v23.append(struct.unpack('Q', f.read(8))[0])
+            bytes_shift += 8
+            f.seek(bytes_shift, 0)
+            # WN -> Week number.
+            v24.append(struct.unpack('I',
+                                     f.read(unsigned_int_size_bytes))[0])
+            bytes_shift += unsigned_int_size_bytes
+            f.seek(bytes_shift, 0)
 
             # Check file
             linea = f.readline()
@@ -218,5 +229,7 @@ def dll_pll_veml_read_tracking_dump (filename):
         GNSS_tracking['var1'] = v20
         GNSS_tracking['var2'] = v21
         GNSS_tracking['PRN'] = v22
+        GNSS_tracking['TOW_ms'] = v23
+        GNSS_tracking['WN'] = v24
 
     return GNSS_tracking

@@ -1633,6 +1633,14 @@ bool Rtklib_Solver::get_PVT(const std::map<int, Gnss_Synchro> &gnss_observables_
                                     d_dump_file.write(reinterpret_cast<char *>(&d_dop[1]), sizeof(double));
                                     d_dump_file.write(reinterpret_cast<char *>(&d_dop[2]), sizeof(double));
                                     d_dump_file.write(reinterpret_cast<char *>(&d_dop[3]), sizeof(double));
+                                    // Reference channel's tracking sample counter (post-Resampler rate,
+                                    // same quantity tracking_ch*.dat's own PRN_start_sample is derived
+                                    // from -- see Tracking_sample_counter in dll_pll_veml_tracking.cc).
+                                    // NOT wall-clock/GPS time, and available whether or not
+                                    // DeepLearningBlock is present, so PVT fixes can be placed on the
+                                    // same time axis as the tracking dumps' C/N0 plots.
+                                    uint64_t tmp_sample_index = gnss_observables_map.cbegin()->second.Tracking_sample_counter;
+                                    d_dump_file.write(reinterpret_cast<char *>(&tmp_sample_index), sizeof(uint64_t));
                                 }
                             catch (const std::ofstream::failure &e)
                                 {

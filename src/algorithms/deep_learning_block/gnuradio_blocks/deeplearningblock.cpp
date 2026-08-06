@@ -108,7 +108,7 @@ public:
         spectrogram_preview_path_ = (dir / "spectrogram_live.pgm").string();
 
         inference_log_.open((dir / "inference_log.csv").string(), std::ios::trunc);
-        inference_log_ << "timestamp_utc,stft_latency_ms,onnx_latency_ms,total_latency_ms,jammer_type\n";
+        inference_log_ << "timestamp_utc,sample_index,stft_latency_ms,onnx_latency_ms,total_latency_ms,jammer_type\n";
 
         filter_log_.open((dir / "filter_switch_log.csv").string(), std::ios::trunc);
         filter_log_ << "timestamp_utc,from_filter,to_filter\n";
@@ -144,6 +144,13 @@ public:
     std::mutex mtx_;
     std::condition_variable cv_;
     std::vector<gr_complex> pending_window_;
+    // Absolute input-stream sample index of pending_window_'s last sample
+    // (this->nitems_read(0) + i at dispatch time) -- lets consumers convert
+    // each inference's true signal-time position (sample_index / fs) instead
+    // of relying on iso_timestamp_now(), which drifts from signal time
+    // whenever the flowgraph isn't running at real-time speed (e.g. ONNX
+    // inference throttling the pipeline below the input file's playback rate).
+    std::uint64_t pending_sample_index_{0};
     bool has_work_{false};
     bool stop_{false};
 
@@ -155,12 +162,12 @@ public:
     StftInput compute_spectrogram(const std::vector<gr_complex> &samples);
     JammerType run_inference(const StftInput &spectrogram);
     void send_filter_command(JammerType jammer_type);
-    void dispatch(const std::deque<gr_complex> &window);
+    void dispatch(const std::deque<gr_complex> &window, std::uint64_t sample_index);
 
 private:
     void worker_loop();
     void write_spectrogram_preview(const StftInput &spectrogram);
-    void log_inference(const char *jammer_str, double stft_ms, double onnx_ms, double total_ms);
+    void log_inference(const char *jammer_str, std::uint64_t sample_index, double stft_ms, double onnx_ms, double total_ms);
 
     DeepLearningBlock *p_{nullptr};
     OnnxModel *om_{nullptr};
@@ -277,16 +284,16 @@ void DeepLearningBlock::Opaque::send_filter_command(JammerType jammer_type)
 }
 
 
-void DeepLearningBlock::Opaque::log_inference(const char *jammer_str, double stft_ms, double onnx_ms, double total_ms)
+void DeepLearningBlock::Opaque::log_inference(const char *jammer_str, std::uint64_t sample_index, double stft_ms, double onnx_ms, double total_ms)
 {
     if (!inference_log_.is_open())
         return;
-    inference_log_ << iso_timestamp_now() << ',' << stft_ms << ',' << onnx_ms << ',' << total_ms << ',' << jammer_str << '\n';
+    inference_log_ << iso_timestamp_now() << ',' << sample_index << ',' << stft_ms << ',' << onnx_ms << ',' << total_ms << ',' << jammer_str << '\n';
     inference_log_.flush();
 }
 
 
-void DeepLearningBlock::Opaque::dispatch(const std::deque<gr_complex> &window)
+void DeepLearningBlock::Opaque::dispatch(const std::deque<gr_complex> &window, std::uint64_t sample_index)
 {
     // Caller (general_work()) only invokes this once it has already observed
     // busy_ == false, so this check is a defensive fallback against the
@@ -302,6 +309,7 @@ void DeepLearningBlock::Opaque::dispatch(const std::deque<gr_complex> &window)
     {
         std::lock_guard<std::mutex> lock(mtx_);
         pending_window_.assign(window.begin(), window.end());
+        pending_sample_index_ = sample_index;
         has_work_ = true;
     }
     busy_.store(true, std::memory_order_release);
@@ -314,12 +322,14 @@ void DeepLearningBlock::Opaque::worker_loop()
     for (;;)
         {
             std::vector<gr_complex> window;
+            std::uint64_t sample_index = 0;
             {
                 std::unique_lock<std::mutex> lock(mtx_);
                 cv_.wait(lock, [this] { return has_work_ || stop_; });
                 if (stop_ && !has_work_)
                     return;
                 window = std::move(pending_window_);
+                sample_index = pending_sample_index_;
                 has_work_ = false;
             }
 
@@ -336,10 +346,10 @@ void DeepLearningBlock::Opaque::worker_loop()
                     const double total_ms = std::chrono::duration<double, std::milli>(t2 - t0).count();
                     const char *jammer_str = jammer_type_name(jammer);
 
-                    std::cout << "Inference: " << jammer_str
-                              << " (STFT " << stft_ms << " ms, ONNX " << onnx_ms << " ms)\n";
+                    // std::cout << "Inference: " << jammer_str
+                    //           << " (STFT " << stft_ms << " ms, ONNX " << onnx_ms << " ms)\n";
 
-                    log_inference(jammer_str, stft_ms, onnx_ms, total_ms);
+                    log_inference(jammer_str, sample_index, stft_ms, onnx_ms, total_ms);
                     send_filter_command(jammer);
                 }
             catch (const std::exception &e)
@@ -404,7 +414,8 @@ int DeepLearningBlock::general_work(int /*noutput_items*/,
             if (static_cast<int>(o_->buffer_.size()) == o_->window_size_ &&
                 !o_->busy_.load(std::memory_order_acquire))
                 {
-                    o_->dispatch(o_->buffer_);
+                    const std::uint64_t sample_index = static_cast<std::uint64_t>(this->nitems_read(0)) + static_cast<std::uint64_t>(i);
+                    o_->dispatch(o_->buffer_, sample_index);
                 }
         }
 

@@ -297,7 +297,7 @@ std::string TcpCmdInterface::set_input_filter(const std::vector<std::string> &co
 {
     if (commandLine.size() < 2)
         {
-            return "ERROR: filter name missing. Use set_input_filter Pass_Through|Notch_Filter|Pulse_Blanking_Filter|Notch_Filter_Lite\n";
+            return "ERROR: filter name missing. Use set_input_filter Pass_Through|Notch_Filter|Pulse_Blanking_Filter|Notch_Filter_Lite|Both\n";
         }
 
     const std::string &requested_filter = commandLine.at(1);
@@ -321,9 +321,13 @@ std::string TcpCmdInterface::set_input_filter(const std::vector<std::string> &co
         {
             command_id = 304;
         }
+    else if (requested_filter == "Both" || requested_filter == "both" || requested_filter == "notch_and_pulse_blanking")
+        {
+            command_id = 305;
+        }
     else
         {
-            return "ERROR: unsupported filter. Use Pass_Through|Notch_Filter|Pulse_Blanking_Filter|Notch_Filter_Lite\n";
+            return "ERROR: unsupported filter. Use Pass_Through|Notch_Filter|Pulse_Blanking_Filter|Notch_Filter_Lite|Both\n";
         }
 
     if (control_queue_ == nullptr)

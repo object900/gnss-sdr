@@ -47,7 +47,8 @@ pulse_blanking_cc::pulse_blanking_cc(float pfa,
       n_segments_est_(n_segments_est),
       n_segments_reset_(n_segments_reset),
       n_deg_fred_(2 * length),
-      last_filtered_(false)
+      last_filtered_(false),
+      was_enabled_(false)
 {
     const int32_t alignment_multiple = volk_get_alignment() / sizeof(gr_complex);
     set_alignment(std::max(1, alignment_multiple));
@@ -74,6 +75,7 @@ int pulse_blanking_cc::general_work(int noutput_items, gr_vector_int &ninput_ite
         {
             if (!enabled_.load(std::memory_order_relaxed))
                 {
+                    was_enabled_ = false;
                     std::copy(in, in + length_, out);
                     in += length_;
                     out += length_;
@@ -82,8 +84,21 @@ int pulse_blanking_cc::general_work(int noutput_items, gr_vector_int &ninput_ite
                     continue;
                 }
 
+            if (!was_enabled_)
+                {
+                    // Re-enabled after a bypass period (e.g. a telecommand toggling this
+                    // filter on well after startup): n_segments_ kept advancing during
+                    // bypass, so without this reset it would already be >= n_segments_est_
+                    // and skip noise-floor training entirely, dividing by a stale/zero
+                    // noise_power_estimation_ and blanking every segment forever.
+                    n_segments_ = 0;
+                    noise_power_estimation_ = 0.0F;
+                    last_filtered_ = false;
+                    was_enabled_ = true;
+                }
+
             work_iterations_++;
-            if (work_iterations_ % 100000ULL == 0ULL)
+            if (work_iterations_ % 10000000ULL == 0ULL)
                 {
                     std::cout << "[PulseBlanking] Iter: " << work_iterations_ << "\n";
                 }
