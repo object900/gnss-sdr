@@ -37,6 +37,14 @@ constexpr int kStftNperseg = 128;
 constexpr double kStftOverlap = 0.75;
 constexpr double kStftClipDb = 60.0;
 
+// Below this softmax certainty, the classification is logged as-is (real class name +
+// certainty, both always written) but NOT acted upon (send_filter_command() is skipped
+// entirely, so whatever filter was already active stays active) -- an uncertain guess
+// must not flip the filter state. Consumers that want to treat low-certainty rows as
+// "no decision" (e.g. plot_cn0_sats_jammer_vs_time.py's apply_certainty_threshold) do so
+// themselves by thresholding the logged `certainty` column, not by the label text.
+constexpr float kCertaintyThreshold = 0.8f;
+
 std::string iso_timestamp_now()
 {
     using namespace std::chrono;
@@ -108,7 +116,7 @@ public:
         spectrogram_preview_path_ = (dir / "spectrogram_live.pgm").string();
 
         inference_log_.open((dir / "inference_log.csv").string(), std::ios::trunc);
-        inference_log_ << "timestamp_utc,sample_index,stft_latency_ms,onnx_latency_ms,total_latency_ms,jammer_type\n";
+        inference_log_ << "timestamp_utc,sample_index,stft_latency_ms,onnx_latency_ms,total_latency_ms,jammer_type,certainty\n";
 
         filter_log_.open((dir / "filter_switch_log.csv").string(), std::ios::trunc);
         filter_log_ << "timestamp_utc,from_filter,to_filter\n";
@@ -160,14 +168,14 @@ public:
     std::ofstream filter_log_;
 
     StftInput compute_spectrogram(const std::vector<gr_complex> &samples);
-    JammerType run_inference(const StftInput &spectrogram);
+    std::pair<JammerType, float> run_inference(const StftInput &spectrogram);
     void send_filter_command(JammerType jammer_type);
     void dispatch(const std::deque<gr_complex> &window, std::uint64_t sample_index);
 
 private:
     void worker_loop();
     void write_spectrogram_preview(const StftInput &spectrogram);
-    void log_inference(const char *jammer_str, std::uint64_t sample_index, double stft_ms, double onnx_ms, double total_ms);
+    void log_inference(const char *jammer_str, float certainty, std::uint64_t sample_index, double stft_ms, double onnx_ms, double total_ms);
 
     DeepLearningBlock *p_{nullptr};
     OnnxModel *om_{nullptr};
@@ -220,7 +228,7 @@ void DeepLearningBlock::Opaque::write_spectrogram_preview(const StftInput &spect
 }
 
 
-JammerType DeepLearningBlock::Opaque::run_inference(
+std::pair<JammerType, float> DeepLearningBlock::Opaque::run_inference(
     const StftInput &spectrogram)
 {
     // Kolejnosc klas modelu = CLASSES z models/ResNet18.ipynb 
@@ -237,10 +245,28 @@ JammerType DeepLearningBlock::Opaque::run_inference(
     const std::vector<int64_t> input_shape = {1, 1, spectrogram.n_freq, spectrogram.n_frames};
     const auto output = om_->run(spectrogram.data, input_shape);
 
-    const auto max_it = std::max_element(output.begin(), output.end());
-    const auto class_index = static_cast<size_t>(std::distance(output.begin(), max_it));
+    if (output.empty())
+        return std::make_pair(JammerType::NOJAM, 0.0f);
 
-    return (class_index < kClassToJammer.size()) ? kClassToJammer[class_index] : JammerType::NOJAM;
+    std::vector<float> probabilities(output.size(), 0.0f);
+    const float max_logit = *std::max_element(output.begin(), output.end());
+    float denom = 0.0f;
+    for (size_t i = 0; i < output.size(); ++i)
+        {
+            const float exp_value = std::exp(output[i] - max_logit);
+            probabilities[i] = exp_value;
+            denom += exp_value;
+        }
+
+    for (float &probability : probabilities)
+        probability /= denom;
+
+    const auto max_it = std::max_element(probabilities.begin(), probabilities.end());
+    const auto class_index = static_cast<size_t>(std::distance(probabilities.begin(), max_it));
+    const float certainty = (class_index < probabilities.size()) ? probabilities[class_index] : 0.0f;
+    const JammerType jammer_type = (class_index < kClassToJammer.size()) ? kClassToJammer[class_index] : JammerType::NOJAM;
+
+    return std::make_pair(jammer_type, certainty);
 }
 
 
@@ -284,11 +310,13 @@ void DeepLearningBlock::Opaque::send_filter_command(JammerType jammer_type)
 }
 
 
-void DeepLearningBlock::Opaque::log_inference(const char *jammer_str, std::uint64_t sample_index, double stft_ms, double onnx_ms, double total_ms)
+void DeepLearningBlock::Opaque::log_inference(const char *jammer_str, float certainty, std::uint64_t sample_index, double stft_ms, double onnx_ms, double total_ms)
 {
     if (!inference_log_.is_open())
         return;
-    inference_log_ << iso_timestamp_now() << ',' << sample_index << ',' << stft_ms << ',' << onnx_ms << ',' << total_ms << ',' << jammer_str << '\n';
+    inference_log_ << std::fixed << std::setprecision(6)
+                  << iso_timestamp_now() << ',' << sample_index << ',' << stft_ms << ',' << onnx_ms << ',' << total_ms << ','
+                  << jammer_str << ',' << certainty << '\n';
     inference_log_.flush();
 }
 
@@ -338,19 +366,23 @@ void DeepLearningBlock::Opaque::worker_loop()
                     const auto t0 = std::chrono::steady_clock::now();
                     auto spectrogram = compute_spectrogram(window);
                     const auto t1 = std::chrono::steady_clock::now();
-                    auto jammer = run_inference(spectrogram);
+                    const auto inference_result = run_inference(spectrogram);
                     const auto t2 = std::chrono::steady_clock::now();
 
                     const double stft_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                     const double onnx_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
                     const double total_ms = std::chrono::duration<double, std::milli>(t2 - t0).count();
+                    const JammerType jammer = inference_result.first;
+                    const float certainty = inference_result.second;
+                    const bool confident = certainty >= kCertaintyThreshold;
                     const char *jammer_str = jammer_type_name(jammer);
 
                     // std::cout << "Inference: " << jammer_str
                     //           << " (STFT " << stft_ms << " ms, ONNX " << onnx_ms << " ms)\n";
 
-                    log_inference(jammer_str, sample_index, stft_ms, onnx_ms, total_ms);
-                    send_filter_command(jammer);
+                    log_inference(jammer_str, certainty, sample_index, stft_ms, onnx_ms, total_ms);
+                    if (confident)
+                        send_filter_command(jammer);
                 }
             catch (const std::exception &e)
                 {
