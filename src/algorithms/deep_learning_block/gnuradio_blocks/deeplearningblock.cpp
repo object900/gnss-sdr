@@ -43,7 +43,7 @@ constexpr double kStftClipDb = 60.0;
 // must not flip the filter state. Consumers that want to treat low-certainty rows as
 // "no decision" (e.g. plot_cn0_sats_jammer_vs_time.py's apply_certainty_threshold) do so
 // themselves by thresholding the logged `certainty` column, not by the label text.
-constexpr float kCertaintyThreshold = 0.8f;
+constexpr float kCertaintyThreshold = 0.6f;
 
 std::string iso_timestamp_now()
 {
